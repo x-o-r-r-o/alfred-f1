@@ -236,7 +236,7 @@ class NextRaceTests(Base):
         Mock.overrides["2026/races"] = schedule_without(16)
         it = sf("", now="2026-09-26T15:00:00Z")
         self.assertEqual(it[0]["title"], "🇸🇬 Singapore Grand Prix")
-        self.assertIn("Round 17 of 22", it[0]["subtitle"])
+        self.assertTrue(it[0]["subtitle"].startswith("Round 17 · "), it[0]["subtitle"])
 
     def test_missing_session_times_are_tbc(self):
         it = sf("", now="2021-07-15T12:00:00Z")
@@ -446,6 +446,7 @@ class ScheduleTests(Base):
         it = sf("1950 schedule")
         self.assertEqual(it[0]["title"], "1. 🇬🇧 British Grand Prix")
         self.assertIn("Sat 13 May 1950", it[0]["subtitle"])
+        self.assertIn("Winner Nino Farina (Alfa Romeo)", it[0]["subtitle"])
 
     def test_unicode_and_quotes(self):
         for q in ['drivers "Hülk\'', "results 'monaco\"", "drivers \n\t", "😀", "schedule ;rm -rf ~"]:
@@ -481,8 +482,7 @@ class CacheTests(Base):
         cache = new_cache()
         sf("drivers", cache=cache)
         age(cache_file(cache, "2026/driverstandings"), 2 * 3600)
-        Mock.mode = "down"
-        it = sf("drivers", cache=cache, F1_SYNC="1")
+        it = sf("drivers", cache=cache, F1_SYNC="1", F1_API_BASE="http://127.0.0.1:9/ergast/f1")
         self.assertTrue(it[0]["title"].startswith("Offline: showing data from 2 h"), it[0]["title"])
         self.assertEqual(it[1]["title"], "2026 Drivers’ Championship")
 
@@ -515,7 +515,7 @@ class CacheTests(Base):
                 break
             time.sleep(0.1)
         it = sf("drivers", cache=cache)
-        self.assertTrue(it[0]["title"].startswith("Offline: showing data from 3 h"), it[0]["title"])
+        self.assertTrue(it[0]["title"].startswith("Couldn’t update: showing data from 3 h"), it[0]["title"])
         self.assertIn("HTTP 503", it[0]["subtitle"])
 
     def test_results_refresh_every_10_minutes_around_race_time(self):
@@ -644,6 +644,61 @@ class AuditRegressionTests(Base):
     def test_year_anywhere_in_query(self):
         self.assertEqual(sf("drivers 2021")[0]["title"], "2021 Drivers’ Championship")
         self.assertEqual(sf("results 2021 10 sprint")[0]["title"], "🇬🇧 British Grand Prix · Sprint")
+
+
+class AuditPass2Tests(Base):
+    def test_round_of_total_needs_contiguous_rounds(self):
+        # a cancelled race removed without renumbering must not give "Round 17 of 22"
+        Mock.overrides["2026/races"] = schedule_without(16)
+        self.assertNotIn(" of 22", sf("")[0]["subtitle"])
+        Mock.overrides.clear()
+        self.assertIn("Round 16 of 23", sf("")[0]["subtitle"])
+
+    def test_winners_unavailable_is_not_results_pending(self):
+        cache = new_cache()
+        sf("", cache=cache)  # schedule cached, winners not
+        Mock.mode = "down"
+        it = sf("schedule", cache=cache)
+        self.assertEqual(it[0]["title"], "Winners unavailable")
+        self.assertFalse(any("Results pending" in i["subtitle"] for i in it))
+        self.assertEqual(len(it), 24)
+
+    def test_results_before_the_first_race_show_last_season(self):
+        it = sf("results", now="2026-02-15T12:00:00Z")
+        self.assertEqual(it[0]["title"], "No race yet in 2026")
+        self.assertIn("Showing 2025", it[0]["subtitle"])
+        self.assertEqual(it[1]["title"], "🇦🇪 Abu Dhabi Grand Prix · Race")
+        # an explicit year never falls back
+        self.assertEqual(sf("2026 results", now="2026-02-15T12:00:00Z")[0]["title"], "No race yet in 2026")
+
+    def test_http_error_on_refresh_is_not_called_offline(self):
+        cache = new_cache()
+        sf("drivers", cache=cache)
+        age(cache_file(cache, "2026/driverstandings"), 2 * 3600)
+        Mock.mode = "429"
+        it = sf("drivers", cache=cache, F1_SYNC="1")
+        self.assertTrue(it[0]["title"].startswith("Couldn’t update: showing data from 2 h"), it[0]["title"])
+        self.assertIn("rate limiting", it[0]["subtitle"])
+
+    def test_every_historical_nationality_and_country_has_a_flag(self):
+        with open(os.path.join(SRC, "f1.js")) as fh:
+            js = fh.read()
+        def keys(name):
+            body = re.search(name + r" = \{(.*?)\};", js, re.S).group(1)
+            return set(k.strip('"') for k in re.findall(r'("[^"]+"|[a-z]+):', body))
+        nat, country = keys("NATIONALITY"), keys("COUNTRY")
+        # every value the API has used (drivers, constructors and circuits since 1950)
+        for n in ["American", "Argentine", "Australian", "Austrian", "Belgian", "Brazilian", "British", "Canadian", "Chilean",
+                  "Chinese", "Colombian", "Czech", "Danish", "Dutch", "East German", "Finnish", "French", "German", "Hong Kong",
+                  "Hungarian", "Indian", "Indonesian", "Irish", "Italian", "Japanese", "Liechtensteiner", "Malaysian", "Mexican",
+                  "Monegasque", "New Zealander", "Polish", "Portuguese", "Rhodesian", "Russian", "South African", "Spanish",
+                  "Swedish", "Swiss", "Thai", "Uruguayan", "Venezuelan"]:
+            self.assertIn(n.lower(), nat)
+        for c in ["Argentina", "Australia", "Austria", "Azerbaijan", "Bahrain", "Belgium", "Brazil", "Canada", "China", "France",
+                  "Germany", "Hungary", "India", "Italy", "Japan", "Korea", "Malaysia", "Mexico", "Monaco", "Morocco",
+                  "Netherlands", "Portugal", "Qatar", "Russia", "Saudi Arabia", "Singapore", "South Africa", "Spain", "Sweden",
+                  "Switzerland", "Turkey", "UAE", "UK", "USA"]:
+            self.assertIn(c.lower(), country)
 
 
 class PlistTests(unittest.TestCase):

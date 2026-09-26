@@ -408,9 +408,10 @@ function backgroundRefresh(path) {
   return "";
 }
 
-function staleNotice(age, error) {
-  const n = info(`Offline: showing data from ${ago(age * 1000)}`, `${error || "Could not update"} · Updates when the F1 API is reachable`, "offline");
-  if (!NOTICES.some((x) => x.title.startsWith("Offline"))) NOTICES.push(n);
+function staleNotice(age, error, status) {
+  const title = status ? `Couldn’t update: showing data from ${ago(age * 1000)}` : `Offline: showing data from ${ago(age * 1000)}`;
+  const n = info(title, `${error || "Could not update"} · Updates when the F1 API is reachable`, "offline");
+  if (!NOTICES.some((x) => x.icon.path === "icons/offline.png")) NOTICES.push(n);
 }
 
 // Cached GET: fresh cache → cached data; stale → cached data + background refresh; none → fetch now.
@@ -437,13 +438,14 @@ function api(path, ttl) {
     }
     if (attemptAge !== null && attemptAge < RETRY_AFTER) {
       // the last refresh finished without updating the cache: it failed
-      staleNotice(age, lastAttempt(file).error);
+      const a = lastAttempt(file);
+      staleNotice(age, a.error, a.status);
       return { data, stale: true };
     }
     if (env("F1_SYNC", "") === "1") {
       const r = refreshNow(path);
       if (r.data) return { data: r.data };
-      staleNotice(age, r.error);
+      staleNotice(age, r.error, r.status);
       return { data, stale: true };
     }
     refreshInBackground(path);
@@ -579,7 +581,12 @@ function menuItems(year, filter) {
 
 // ---------- next race weekend ----------
 
-function raceHeader(race, total, sessions) {
+function roundText(race, races) {
+  const contiguous = races.length && +races[races.length - 1].round === races.length;
+  return `Round ${race.round}${contiguous ? ` of ${races.length}` : ""}`;
+}
+
+function raceHeader(race, races, sessions) {
   const [page, alt] = racePages(race);
   const flag = countryFlag(race.Circuit.Location.country);
   const loc = [race.Circuit.circuitName, race.Circuit.Location.locality].filter(Boolean).join(", ");
@@ -589,7 +596,7 @@ function raceHeader(race, total, sessions) {
   if (live) status = `🔴 ${live.name} live now`;
   else if (next) status = `${next.name} ${next.start ? until(next.start.getTime() - NOW.getTime()) : dayCountdown(next.date) + " (time TBC)"}`;
   else status = "Weekend over";
-  const parts = [`Round ${race.round}${total ? ` of ${total}` : ""}`, loc];
+  const parts = [roundText(race, races), loc];
   if (isSprintWeekend(race)) parts.push("Sprint weekend");
   parts.push(status);
   const copy = [`${race.raceName} (${race.season}, round ${race.round})`, loc].concat(sessions.map((s) => `${s.name}: ${whenText(s)}`)).join("\n");
@@ -639,7 +646,7 @@ function sessionItem(race, s, withYear) {
 function nextRaceItems() {
   let sch = schedule(THIS_YEAR);
   if (sch.error) return errorItems(sch, "the schedule").concat(menuItems(null, ""));
-  let races = sch.races, total = races.length;
+  let races = sch.races;
   let race = races.find((r) => !raceOver(r));
   if (!races.length) {
     // January: this season's calendar isn't out yet; point at last season's final race
@@ -653,7 +660,6 @@ function nextRaceItems() {
     const nxt = schedule(THIS_YEAR + 1);
     if (!nxt.error && nxt.races.length) {
       races = nxt.races;
-      total = races.length;
       race = races.find((r) => !raceOver(r));
     }
   }
@@ -665,7 +671,7 @@ function nextRaceItems() {
   }
   const sessions = sessionsOf(race);
   const withYear = +race.season !== THIS_YEAR;
-  return [raceHeader(race, total, sessions)].concat(sessions.map((s) => sessionItem(race, s, withYear)), menuItems(null, ""));
+  return [raceHeader(race, races, sessions)].concat(sessions.map((s) => sessionItem(race, s, withYear)), menuItems(null, ""));
 }
 
 // ---------- standings ----------
@@ -860,7 +866,7 @@ function matchRace(races, text) {
   return races.find((r) => fold([r.raceName, r.Circuit.circuitName, r.Circuit.circuitId, r.Circuit.Location.locality, r.Circuit.Location.country].join(" ")).includes(f)) || null;
 }
 
-function resultItems(year, rest, kind) {
+function resultItems(year, rest, kind, yearGiven) {
   const args = parseResultArgs(rest, kind);
   kind = args.kind;
   const K = KINDS[kind];
@@ -888,6 +894,11 @@ function resultItems(year, rest, kind) {
     }).reverse();
     if (!candidates.length) {
       const first = races.find((r) => kindSession(r, kind));
+      if (!yearGiven && year === THIS_YEAR && year > 1950) {
+        const s0 = first && kindSession(first, kind);
+        const note = info(`No ${K.label.toLowerCase()} yet in ${year}`, s0 ? `Showing ${year - 1} · First ${year}: ${first.raceName} ${whenText(s0)}` : `Showing ${year - 1}`, "info");
+        return [note].concat(resultItems(year - 1, rest, kind, true));
+      }
       if (!first) return [info(`No ${K.label.toLowerCase()} results in ${year}`, kind === "sprint" ? "No sprint weekends that season" : "", "info")];
       const s = kindSession(first, kind);
       return [info(`No ${K.label.toLowerCase()} yet in ${year}`, `First: ${first.raceName} ${whenText(s)}`, "info")].concat(menuItems(year === THIS_YEAR ? null : year, ""));
@@ -1033,15 +1044,18 @@ function scheduleItems(year, filter) {
   const pre = +year === THIS_YEAR ? "" : `${year} `;
   const anyDone = races.some(raceOver);
   const winners = {};
+  let winnersError = null;
   if (anyDone) {
     const w = api(`${year}/results/1`, resultsTtl(year, races, false));
-    if (!w.error) for (const r of w.data.RaceTable.Races || []) if (r.Results && r.Results[0]) winners[r.round] = r.Results[0];
+    if (w.error) winnersError = w;
+    else for (const r of w.data.RaceTable.Races || []) if (r.Results && r.Results[0]) winners[r.round] = r.Results[0];
   }
   const next = races.find((r) => !raceOver(r));
   const withYear = +year !== THIS_YEAR;
   const f = fold(filter).trim();
   const shown = races.filter((r) => !f || f.split(/\s+/).every((wd) => fold([r.raceName, r.Circuit.circuitName, r.Circuit.Location.locality, r.Circuit.Location.country, `round ${r.round}`].join(" ")).includes(wd)));
   const items = [];
+  if (winnersError) items.push(info("Winners unavailable", winnersError.error, winnersError.status === 0 ? "offline" : "error"));
   if (!shown.length) items.push(info(`No ${year} race matches “${filter.trim()}”`, "Search by race, circuit, city or country"));
   for (const r of shown) {
     const [page, alt] = racePages(r);
@@ -1055,7 +1069,8 @@ function scheduleItems(year, filter) {
       icon = "done";
       const w = winners[r.round];
       parts.push(`✓ ${when}`);
-      parts.push(w ? `Winner ${driverName(w.Driver)} (${w.Constructor.name})` : "Results pending");
+      if (w) parts.push(`Winner ${driverName(w.Driver)} (${w.Constructor.name})`);
+      else if (!winnersError) parts.push("Results pending");
     } else if (r === next) {
       icon = "next";
       const sessions = sessionsOf(r);
@@ -1225,9 +1240,9 @@ function raceCommand(query) {
     case "next": return nextRaceItems();
     case "drivers": return driverStandingItems(y, rest.join(" "));
     case "teams": return teamStandingItems(y, rest.join(" "));
-    case "results": return resultItems(y, rest, "results");
-    case "quali": return resultItems(y, rest, "qualifying");
-    case "sprint": return resultItems(y, rest, "sprint");
+    case "results": return resultItems(y, rest, "results", !!year);
+    case "quali": return resultItems(y, rest, "qualifying", !!year);
+    case "sprint": return resultItems(y, rest, "sprint", !!year);
     case "schedule": return scheduleItems(y, rest.join(" "));
   }
   const menu = menuItems(year, words[0]);
