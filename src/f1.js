@@ -595,7 +595,7 @@ function raceHeader(race, races, sessions) {
   let status = "";
   if (live) status = `🔴 ${live.name} live now`;
   else if (next) status = `${next.name} ${next.start ? until(next.start.getTime() - NOW.getTime()) : dayCountdown(next.date) + " (time TBC)"}`;
-  else status = "Weekend over";
+  else status = "Race finished";
   const parts = [roundText(race, races), loc];
   if (isSprintWeekend(race)) parts.push("Sprint weekend");
   parts.push(status);
@@ -1024,7 +1024,9 @@ function switchItems(year, race, races, current) {
   const i = races.indexOf(race);
   const w = word[current || "results"];
   if (i > 0) items.push(info(`◀ Round ${races[i - 1].round} · ${races[i - 1].raceName}`, "Tab to show the previous round", "results", { autocomplete: `${pre}${w} ${races[i - 1].round} ` }));
-  if (i >= 0 && i < races.length - 1 && raceOver(races[i + 1])) items.push(info(`Round ${races[i + 1].round} · ${races[i + 1].raceName} ▶`, "Tab to show the next round", "results", { autocomplete: `${pre}${w} ${races[i + 1].round} ` }));
+  // offer the next round once its session has happened (qualifying is done a day before the race)
+  const nextS = i >= 0 && i < races.length - 1 ? kindSession(races[i + 1], current || "results") : null;
+  if (nextS && hasStarted(nextS)) items.push(info(`Round ${races[i + 1].round} · ${races[i + 1].raceName} ▶`, "Tab to show the next round", "results", { autocomplete: `${pre}${w} ${races[i + 1].round} ` }));
   return items;
 }
 
@@ -1048,7 +1050,7 @@ function scheduleItems(year, filter) {
   if (anyDone) {
     const w = api(`${year}/results/1`, resultsTtl(year, races, false));
     if (w.error) winnersError = w;
-    else for (const r of w.data.RaceTable.Races || []) if (r.Results && r.Results[0]) winners[r.round] = r.Results[0];
+    else for (const r of (w.data.RaceTable && w.data.RaceTable.Races) || []) if (r.Results && r.Results[0] && r.Results[0].Driver) winners[r.round] = r.Results[0];
   }
   const next = races.find((r) => !raceOver(r));
   const withYear = +year !== THIS_YEAR;
@@ -1076,7 +1078,12 @@ function scheduleItems(year, filter) {
       const sessions = sessionsOf(r);
       const upcoming = sessions.find((s) => sessionState(s) !== "done");
       parts.push(`Next · ${when}`);
-      if (st) parts.push(until(st.getTime() - NOW.getTime()));
+      const raceS = sessions.find((s) => s.key === "Race");
+      const rs = raceS ? sessionState(raceS) : "upcoming";
+      // the weekend stays "next" until three hours after the start: never show a negative countdown
+      if (rs === "live") parts.push("🔴 Race live now");
+      else if (rs === "done") parts.push("Race finished");
+      else if (st) parts.push(until(st.getTime() - NOW.getTime()));
       else parts.push(dayCountdown(r.date));
       if (upcoming && upcoming.key !== "Race" && hasStarted(sessions[0])) parts.push(`${upcoming.name} ${sessionState(upcoming) === "live" ? "live now" : "next"}`);
     } else {

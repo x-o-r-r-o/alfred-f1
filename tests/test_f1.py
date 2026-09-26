@@ -22,7 +22,7 @@ def fixture(name):
 # ---------- mock API ----------
 
 class Mock:
-    mode = "ok"          # ok | down (503) | 429 | html | slow
+    mode = "ok"          # ok | down (503) | 429 | html
     overrides = {}       # path -> JSON document
     page_size = None     # force pagination
     hits = []
@@ -42,8 +42,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(429, b'{"detail":"Too many requests"}')
         if Mock.mode == "html":
             return self.reply(200, b"<html>Cloudflare error</html>", "text/html")
-        if Mock.mode == "slow":
-            time.sleep(1.5)
         if path in Mock.overrides:
             doc = copy.deepcopy(Mock.overrides[path])
         else:
@@ -205,7 +203,7 @@ class NextRaceTests(Base):
 
     def test_race_stays_until_three_hours_after_start(self):
         self.assertEqual(sf("", now="2026-09-26T13:59:00Z")[0]["title"], "🇦🇿 Azerbaijan Grand Prix")
-        self.assertIn("Weekend over", sf("", now="2026-09-26T13:59:00Z")[0]["subtitle"])
+        self.assertIn("Race finished", sf("", now="2026-09-26T13:59:00Z")[0]["subtitle"])
         self.assertEqual(sf("", now="2026-09-26T14:01:00Z")[0]["title"], "🇲🇾 Bahrain Grand Prix in Malaysia")
 
     def test_sprint_weekend_order(self):
@@ -699,6 +697,28 @@ class AuditPass2Tests(Base):
                   "Netherlands", "Portugal", "Qatar", "Russia", "Saudi Arabia", "Singapore", "South Africa", "Spain", "Sweden",
                   "Switzerland", "Turkey", "UAE", "UK", "USA"]:
             self.assertIn(c.lower(), country)
+
+
+class AuditPass3Tests(Base):
+    def test_next_round_shortcut_follows_the_session(self):
+        # Friday evening in Baku: qualifying for round 15 is done, the race (Saturday) is not
+        it = sf("quali 14", now="2026-09-25T20:00:00Z")
+        self.assertEqual(find(it, "Round 15")["autocomplete"], "quali 15 ")
+        it = sf("results 14", now="2026-09-25T20:00:00Z")
+        self.assertFalse(any(t.startswith("Round 15") for t in titles(it)))
+
+    def test_schedule_never_shows_a_negative_countdown(self):
+        # found against the live API: 2 h 30 min after the start the race is still "next"
+        row = sf("schedule", now="2026-09-26T13:30:00Z")[14]
+        self.assertIn("Race finished", row["subtitle"])
+        self.assertNotIn("in under a minute", row["subtitle"])
+        self.assertIn("🔴 Race live now", sf("schedule", now="2026-09-26T11:30:00Z")[14]["subtitle"])
+
+    def test_malformed_winners_response(self):
+        Mock.overrides["2026/results/1"] = {"MRData": {"total": "0"}}
+        it = sf("schedule")
+        self.assertEqual(it[0]["title"], "1. 🇦🇺 Australian Grand Prix")
+        self.assertIn("Results pending", it[0]["subtitle"])
 
 
 class PlistTests(unittest.TestCase):
