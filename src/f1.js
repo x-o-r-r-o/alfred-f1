@@ -748,6 +748,63 @@ function standings(year, which) {
   return { season: l ? +l.season : year, round: l ? +l.round : 0, rows: l ? l[key] || [] : [] };
 }
 
+// Positions and points after the previous round, keyed by driver or constructor id (for ▲▼ and points
+// gained). No extra wait when already offline or rate limited; a failed request just leaves them out.
+function previousStandings(year, which, round) {
+  if (!(round > 1)) return null;
+  const path = `${year}/${round - 1}/${which}standings`;
+  let data = null;
+  if (NOTICES.length) data = cachedJSON(path);
+  else {
+    const r = api(path, pastSeason(year) ? 30 * DAY : DAY, year);
+    data = r.error ? null : r.data;
+  }
+  const lists = (data && data.StandingsTable && data.StandingsTable.StandingsLists) || [];
+  const l = lists[lists.length - 1];
+  if (!l || +l.round !== round - 1) return null;
+  const out = new Map();
+  for (const r of l[which === "driver" ? "DriverStandings" : "ConstructorStandings"] || []) {
+    const id = which === "driver" ? r.Driver && r.Driver.driverId : r.Constructor && r.Constructor.constructorId;
+    if (id) out.set(id, { pos: /^\d+$/.test(r.positionText || "") ? +r.positionText : null, points: +r.points });
+  }
+  return out;
+}
+
+// "199 pts (+18)" and "▲1": points and places gained in the last round
+function movement(prev, id, pos, pts) {
+  const p = prev && prev.get(id);
+  if (!p) return { pts: ptsText(pts), move: "" };
+  const gained = pts - p.points;
+  const d = /^\d+$/.test(pos) && p.pos ? p.pos - +pos : 0;
+  return { pts: `${ptsText(pts)}${gained > 0 ? ` (+${fmtPts(gained)})` : ""}`, move: d > 0 ? `▲${d}` : d < 0 ? `▼${-d}` : "" };
+}
+
+// The most points one driver (or team) can still score in the rounds after `round`, under the rules
+// from 2025 on: 25 for a race win and 8 for a sprint win (a team's two cars: 25 + 18 and 8 + 7), no
+// fastest-lap point. null for older seasons or when the schedule can't be loaded.
+function titleFight(year, round, which) {
+  if (year < 2025) return null;
+  const sch = schedule(year);
+  if (sch.error || !sch.races.length) return null;
+  const rest = sch.races.filter((r) => +r.round > round);
+  if (!rest.length) return null;
+  const d = which === "driver", sprints = rest.filter(isSprintWeekend).length;
+  return { rounds: rest.length, points: rest.length * (d ? 25 : 43) + sprints * (d ? 8 : 15) };
+}
+// Header text, and each row's status: the leader has won the title once no one can catch them
+// (a tie on points could still go either way on countback), and a rival is out once even every
+// remaining win wouldn't be enough.
+function fightText(fight, rows, name) {
+  if (!fight) return { head: "", clinched: false };
+  const leader = +rows[0].points, second = rows[1] ? +rows[1].points : 0;
+  const clinched = leader - second > fight.points;
+  return {
+    head: clinched ? `${name(rows[0])} has won the title` : `${plural(fight.rounds, "round")} left, ${ptsText(fight.points)} available`,
+    clinched,
+    out: (pts) => leader - pts > fight.points,
+  };
+}
+
 // ---------- menu ----------
 
 const COMMANDS = [
@@ -899,9 +956,11 @@ function driverStandingItems(year, filter) {
   const items = [];
   if (note) items.push(note);
   const final = isFinal(year, st.round);
+  const fight = final ? fightText(null) : fightText(titleFight(year, st.round, "driver"), st.rows, (r) => r.Driver.familyName);
+  const prev = previousStandings(year, "driver", st.round);
   items.push({
     title: `${year} Drivers’ Championship`,
-    subtitle: `${final ? "Final standings" : `After round ${st.round}`} · ⌘↩ copies the table`,
+    subtitle: [final ? "Final standings" : `After round ${st.round}`, fight.head, "⌘↩ copies the table"].filter(Boolean).join(" · "),
     arg: `copy:${table}`,
     valid: true,
     text: { copy: table, largetype: table },
@@ -919,7 +978,10 @@ function driverStandingItems(year, filter) {
     const current = teams[teams.length - 1];
     const pts = +r.points;
     const pos = /^\d+$/.test(r.positionText || "") ? r.positionText : r.position || "–";
-    const gap = gapText(pos, pts, leader, second, st.rows.length);
+    let gap = gapText(pos, pts, leader, second, st.rows.length);
+    if (fight.clinched && r === st.rows[0]) gap += " · champion";
+    else if (fight.out && r !== st.rows[0] && fight.out(pts)) gap += " · out of the title fight";
+    const mv = movement(prev, d.driverId, pos, pts);
     const teamText = teams.map((c) => c.name).join(" → ");
     // permanentNumber is the driver's number today, so only show it for the current season
     const num = d.permanentNumber && year >= THIS_YEAR ? `  #${d.permanentNumber}` : "";
@@ -928,7 +990,7 @@ function driverStandingItems(year, filter) {
     const url = safeUrl(d.url);
     items.push({
       title: r.positionText === "D" ? `DSQ ${withFlag(natFlag(d.nationality), driverName(d))}` : title,
-      subtitle: `${ptsText(pts)} · ${plural(+r.wins, "win")} · ${teamText || "—"} · ${gap}`,
+      subtitle: [mv.pts, mv.move, plural(+r.wins, "win"), teamText || "—", gap].filter(Boolean).join(" · "),
       arg: url ? `open:${url}` : "",
       valid: !!url,
       quicklookurl: url || undefined,
@@ -993,9 +1055,12 @@ function teamStandingItems(year, filter) {
   const table = st.rows.map((r) => `${r.positionText || r.position}. ${r.Constructor.name} ${ptsText(+r.points)}`).join("\n");
   const items = [];
   if (note) items.push(note);
+  const final = isFinal(year, st.round);
+  const fight = final ? fightText(null) : fightText(titleFight(year, st.round, "constructor"), st.rows, (r) => r.Constructor.name);
+  const prev = previousStandings(year, "constructor", st.round);
   items.push({
     title: `${year} Constructors’ Championship`,
-    subtitle: `${isFinal(year, st.round) ? "Final standings" : `After round ${st.round}`} · ⌘↩ copies the table`,
+    subtitle: [final ? "Final standings" : `After round ${st.round}`, fight.head, "⌘↩ copies the table"].filter(Boolean).join(" · "),
     arg: `copy:${table}`,
     valid: true,
     text: { copy: table, largetype: table },
@@ -1008,13 +1073,16 @@ function teamStandingItems(year, filter) {
   for (const r of rows) {
     const c = r.Constructor, pts = +r.points;
     const pos = /^\d+$/.test(r.positionText || "") ? r.positionText : r.position || "–";
-    const gap = gapText(pos, pts, leader, second, st.rows.length);
+    let gap = gapText(pos, pts, leader, second, st.rows.length);
+    if (fight.clinched && r === st.rows[0]) gap += " · champions";
+    else if (fight.out && r !== st.rows[0] && fight.out(pts)) gap += " · out of the title fight";
+    const mv = movement(prev, c.constructorId, pos, pts);
     const ds = byTeam[c.constructorId] || [];
     const text = `${pos}. ${c.name} ${ptsText(+r.points)}, ${plural(+r.wins, "win")}`;
     const url = safeUrl(c.url);
     items.push({
       title: `${pos}. ${withFlag(natFlag(c.nationality), c.name)}`,
-      subtitle: [ptsText(pts), plural(+r.wins, "win"), ds.join(", "), gap].filter(Boolean).join(" · "),
+      subtitle: [mv.pts, mv.move, plural(+r.wins, "win"), ds.join(", "), gap].filter(Boolean).join(" · "),
       arg: url ? `open:${url}` : "",
       valid: !!url,
       quicklookurl: url || undefined,

@@ -18,7 +18,7 @@ Configure the Hotkey to see the next race weekend at a glance.
 
 ### Standings
 
-See the drivers’ championship via `race drivers` and the constructors’ championship via `race teams`, with points, wins, the gap to the leader, nationality flags and team colours. Drivers who changed teams during the season show both. Type a name, team or nationality after the command to filter, like `race drivers ferrari`.
+See the drivers’ championship via `race drivers` and the constructors’ championship via `race teams`, with points, wins, the gap to the leader, nationality flags and team colours. Places and points gained in the last round are marked (▲2, +25), and during the season the list shows how many points are still available and who is out of the title fight. Drivers who changed teams during the season show both. Type a name, team or nationality after the command to filter, like `race drivers ferrari`.
 
 ![Driver standings](images/drivers.png)
 
@@ -36,7 +36,7 @@ See the last race’s classification via `race results`, with the winner, fastes
 
 ### Schedule
 
-See every round of the season via `race schedule`, with the winners of past races and the countdown to the next one. Type a race, city or country to filter. Press <kbd>⇥</kbd> on a past race to see its results.
+See every round of the season via `race schedule`, with the winners of past races and the countdown to the next one. Type a race, city or country to filter. Press <kbd>⇥</kbd> on a past race to see its results. The first row adds every session still to come this season to Calendar in one go.
 
 ![Season schedule](images/schedule.png)
 

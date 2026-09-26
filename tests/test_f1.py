@@ -1130,6 +1130,78 @@ class Round4Tests(Base):
         self.assertEqual(sf("schedule", cache=cache, now="2026-02-01T12:00:00Z")[0]["title"], "Add the 2026 season to Calendar")
         self.assertEqual(act("ics:2025:rest", cache), "No races left in 2025")
 
+    def test_places_and_points_gained_in_the_last_round(self):
+        prev = fixture("2026/driverstandings")
+        lst = prev["MRData"]["StandingsTable"]["StandingsLists"][0]
+        lst["round"] = "14"
+        rows = lst["DriverStandings"]
+        ham, nor = rows[2], rows[3]
+        self.assertEqual((ham["Driver"]["familyName"], nor["Driver"]["familyName"]), ("Hamilton", "Norris"))
+        ham["points"], ham["position"], ham["positionText"] = "173", "4", "4"
+        nor["position"], nor["positionText"] = "3", "3"
+        Mock.overrides["2026/14/driverstandings"] = prev
+        it = sf("drivers")
+        self.assertTrue(find(it, "3. ")["subtitle"].startswith("191 pts (+18) · ▲1 · 1 win · Ferrari"))
+        self.assertTrue(find(it, "4. ")["subtitle"].startswith("186 pts · ▼1 · 2 wins"))
+        self.assertTrue(find(it, "1. ")["subtitle"].startswith("292 pts · 8 wins"))
+        # teams too; without the previous round (not published, offline) the markers are left out
+        tprev = fixture("2026/constructorstandings")
+        tl = tprev["MRData"]["StandingsTable"]["StandingsLists"][0]
+        tl["round"] = "14"
+        tl["ConstructorStandings"][0]["points"] = "460"
+        Mock.overrides["2026/14/constructorstandings"] = tprev
+        self.assertTrue(find(sf("teams"), "1. ")["subtitle"].startswith("503 pts (+43) · 10 wins"))
+        del Mock.overrides["2026/14/constructorstandings"]
+        self.assertTrue(find(sf("teams"), "1. ")["subtitle"].startswith("503 pts · 10 wins"))
+
+    def test_previous_round_is_not_fetched_when_offline(self):
+        cache = new_cache()
+        sf("drivers", cache=cache)
+        age(cache_file(cache, "2026/driverstandings"), 2 * 3600)
+        os.remove(cache_file(cache, "2026/races"))
+        for f in os.listdir(os.path.join(cache, "api")):
+            if f.endswith(".attempt"):
+                os.remove(os.path.join(cache, "api", f))
+        Mock.mode = "down"
+        Mock.hits.clear()
+        it = sf("drivers", cache=cache, F1_SYNC="1")
+        self.assertTrue(it[0]["title"].startswith("Couldn’t update"))
+        self.assertNotIn("2026/14/driverstandings", Mock.hits)
+
+    def test_title_fight(self):
+        # after round 15 of 23 (one sprint left): 8 × 25 + 8 = 208 points for a driver, 8 × 43 + 15 for a team
+        it = sf("drivers")
+        self.assertEqual(it[0]["subtitle"], "After round 15 · 8 rounds left, 208 pts available · ⌘↩ copies the table")
+        self.assertTrue(find(it, "1. ")["subtitle"].endswith("leads by 81"))
+        self.assertTrue(find(it, "2. ")["subtitle"].endswith("−81 to the leader"))
+        doc = fixture("2026/driverstandings")
+        rows = doc["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"]
+        self.assertTrue(any(292 - float(r["points"]) > 208 for r in rows))
+        out = [r for r in rows if 292 - float(r["points"]) > 208][0]
+        row = find(it, out["positionText"] + ". ")
+        self.assertTrue(row["subtitle"].endswith(" · out of the title fight"), row)
+        edge = [r for r in rows if 292 - float(r["points"]) <= 208][-1]
+        self.assertNotIn("out of the title fight", find(it, edge["positionText"] + ". ")["subtitle"])
+        self.assertEqual(sf("teams")[0]["subtitle"], "After round 15 · 8 rounds left, 359 pts available · ⌘↩ copies the table")
+        # a lead bigger than what's left wins the title; exactly as big doesn't (countback)
+        for second, won in (("83", True), ("84", False)):
+            doc = fixture("2026/driverstandings")
+            rows = doc["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"]
+            for r in rows[1:]:
+                r["points"] = str(min(float(r["points"]), float(second)))
+            Mock.overrides["2026/driverstandings"] = doc
+            it = sf("drivers")
+            if won:
+                self.assertEqual(it[0]["subtitle"], "After round 15 · Antonelli has won the title · ⌘↩ copies the table")
+                self.assertTrue(find(it, "1. ")["subtitle"].endswith("leads by 209 · champion"))
+            else:
+                self.assertIn("8 rounds left", it[0]["subtitle"])
+                self.assertNotIn("champion", find(it, "1. ")["subtitle"])
+                self.assertNotIn("out of", find(it, "2. ")["subtitle"])
+        # final standings and seasons before 2025 (other points systems) say nothing about it
+        self.assertEqual(sf("2025 drivers")[0]["subtitle"], "Final standings · ⌘↩ copies the table")
+        self.assertEqual(sf("2021 drivers")[0]["subtitle"], "Final standings · ⌘↩ copies the table")
+
     def test_keyword_with_spaces_or_empty(self):
         cache = new_cache()
         for value, shown in (("  gp ", "gp"), ("", "race"), ("Rennen", "Rennen")):

@@ -24,6 +24,7 @@ Raycast demand this workflow replaces (downloads, 2026-09-26):
 - [x] Off-season, season boundary, cancelled races, pending results, pre-season standings fallback
 - [x] Background refresh: one refresher per cache entry (atomic mkdir lock, 90 s expiry, 60 s deadline), survives Alfred killing the Script Filter; cache pruned daily (60 days, ≤ 300 responses, .ics after a day)
 - [x] Date format setting (day or month first, default follows macOS)
+- [x] v1.1: add the rest of the season to Calendar (`race schedule`, first row); places and points gained in the last round in the standings; points still available, "out of the title fight" and "has won the title" (2025+ points rules)
 - [x] Tests: real API fixtures, mock HTTP server (`F1_API_BASE`), injectable clock (`F1_NOW`), time zones and DST (`TZ`)
 
 ## Tech
@@ -43,6 +44,8 @@ Raycast demand this workflow replaces (downloads, 2026-09-26):
 - Session times and results come from Jolpica, which updates results a few hours after a session; live timing is out of scope.
 - formula1.com race pages use a slug table (2018 onwards); a new circuit without a slug falls back to Wikipedia.
 - Session durations (for "live" markers and calendar events) are nominal: FP 60 min, sprint qualifying 45 min, qualifying 60 min, race 120 min (a race stays "next" for 3 h after the start).
+- Title-fight maths uses the points system from 2025 on (no fastest-lap point) and is shown only for 2025 and later; it counts a sprint weekend's sprint as still to come even if its points are already in the standings, so it can only overstate what's left, never eliminate someone too early.
+- On a completely empty cache, the first `race drivers` makes three requests (standings, schedule, previous round), so the rate limiter spaces them and it takes about 1.3 s once.
 - The rate-limiter mutex takes over a lock older than 3 s; two processes that find the same stale lock at the same instant could both pass once (harmless: at most one extra request).
 
 ## Verify in real Alfred
@@ -50,7 +53,19 @@ Raycast demand this workflow replaces (downloads, 2026-09-26):
 - [ ] Background refresh survives the next keystroke (rerun 0.5 s) and the stale-data notice disappears afterwards.
 - [ ] ⌘↩ opens the .ics in Calendar with the alert from the Workflow’s Configuration; ⌘C and ⌘L on sessions.
 - [ ] Flags and team colour icons render; "Same as macOS" time/date formats follow the region settings.
-- [ ] The notification after ⌘↩ on a standings/results row says "Copied to the clipboard".
+- [ ] The notification after ⌘↩ on a standings/results row says "Copied to the clipboard", and no blank notification appears after ↩ opens a page or ⌘↩ adds to Calendar.
+- [ ] `race schedule` first row imports the rest of the season into Calendar (one import dialog).
+
+## Ideas for v1.1
+Ranked by value for effort (round-4 audit, 2026-09-27; sources: raycast/extensions issues and CHANGELOG of F1 Standings, Alfred Gallery).
+1. Driver season view: ⌥↩ on a driver lists their results this season (`<year>/drivers/<id>/results`, one cached request).
+2. Filter a classification by driver or team (`race results monaco hamilton`): today a second word must match a race.
+3. Teammate head-to-head (qualifying and race) on team standings rows.
+4. Previous winners at the next race's circuit (`circuits/<id>/results/1`) on the next-race header.
+5. Pit stops and fastest laps for a race (Jolpica `pitstops`/`laps`), as an extra Tab row on results.
+6. Fetch the previous round's standings in the background on a cold cache (saves the one-off ~1.3 s wait).
+7. Live session data during a weekend (OpenF1): out of scope today, the most requested thing in F1 apps generally.
+8. Add to a chosen calendar without Calendar's import dialog (needs Automation permission for Calendar; the .ics route avoids that on purpose).
 
 ## Release checklist (Alfred forum + Gallery)
 Sources: alfred.app/submit, alfred.app/submit/styleguide, alfred.app/submit/screenshots, alfredforum.com topics 23976 and 23388.
