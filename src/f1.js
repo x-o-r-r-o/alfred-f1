@@ -107,7 +107,7 @@ function dict(o) {
 }
 
 function kw() {
-  return env("keyword_race", "race");
+  return env("keyword_race", "").trim() || "race";
 }
 
 // ---------- flags ----------
@@ -156,13 +156,31 @@ function teamIcon(id) {
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+// The locale behind "Same as macOS": the region settings (read from the user defaults, so it works
+// without LANG, as in Alfred's environment). F1_LOCALE overrides it for tests.
+function userLocale() {
+  const id = env("F1_LOCALE", "");
+  return id ? $.NSLocale.localeWithLocaleIdentifier(id) : $.NSLocale.currentLocale;
+}
+// Date format pattern letters outside 'quoted literals'.
+function patternLetters(p) {
+  return String(p || "").replace(/'[^']*'/g, "");
+}
+
 function use12h() {
   const f = env("time_format", "system");
   if (f === "12") return true;
   if (f === "24") return false;
   try {
-    const t = $.NSDateFormatter.dateFormatFromTemplateOptionsLocale("j", 0, $.NSLocale.currentLocale);
-    return !t.isNil() && t.js.includes("a");
+    // the short time style follows the 24-hour time switch in System Settings; its hour symbol says
+    // which clock it uses (h/K = 12-hour, also with "B" day periods as in zh_TW or hi_IN, which have no "a")
+    const df = $.NSDateFormatter.alloc.init;
+    df.locale = userLocale();
+    df.dateStyle = $.NSDateFormatterNoStyle;
+    df.timeStyle = $.NSDateFormatterShortStyle;
+    let p = patternLetters(df.dateFormat.js);
+    if (!/[hHkK]/.test(p)) p = patternLetters($.NSDateFormatter.dateFormatFromTemplateOptionsLocale("j", 0, userLocale()).js);
+    return /[hK]/.test(p);
   } catch (e) {
     return false;
   }
@@ -175,8 +193,11 @@ function monthFirst() {
   if (f === "dmy") return false;
   if (f === "mdy") return true;
   try {
-    const t = $.NSDateFormatter.dateFormatFromTemplateOptionsLocale("MMMd", 0, $.NSLocale.currentLocale);
-    return !t.isNil() && t.js.indexOf("M") < t.js.indexOf("d");
+    const t = $.NSDateFormatter.dateFormatFromTemplateOptionsLocale("MMMd", 0, userLocale());
+    if (t.isNil()) return false;
+    const p = patternLetters(t.js);
+    const m = p.search(/[ML]/), d = p.indexOf("d"); // "L" is the stand-alone month (fa_IR: "d LLL")
+    return m >= 0 && d >= 0 && m < d;
   } catch (e) {
     return false;
   }
@@ -1466,8 +1487,10 @@ function run(argv) {
   try {
     switch (cmd) {
       case "race": return output(raceCommand(query));
-      case "act": return act(query);
-      case "refresh": return backgroundRefresh(query);
+      // no output at all when there's nothing to say: osascript would print an empty line, which
+      // Alfred passes on and the notification ("only show if populated") would show as a blank banner
+      case "act": return act(query) || undefined;
+      case "refresh": backgroundRefresh(query); return undefined;
       default: return output([info(`Unknown command: ${cmd}`, "", "error")]);
     }
   } catch (e) {

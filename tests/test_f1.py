@@ -1060,6 +1060,55 @@ class FinalReviewTests(Base):
         self.assertIn("Test mode: F1_API_BASE is not set", out.stdout)
 
 
+def alfred_env(cache, **extra):
+    """Alfred's real environment: no LANG/LC_*, no Homebrew, config values as Alfred passes them."""
+    e = {"HOME": os.environ.get("HOME", "/tmp"), "USER": os.environ.get("USER", ""), "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "alfred_workflow_cache": cache,
+         "alfred_workflow_data": os.path.join(cache, "Workflow Data", "io.github.x-o-r-r-o.f1"),
+         "alfred_workflow_bundleid": "io.github.x-o-r-r-o.f1", "alfred_workflow_name": "Formula 1", "alfred_version": "5.6",
+         "alfred_debug": "0", "keyword_race": "race", "race_page": "f1", "time_format": "system", "date_format": "system",
+         "calendar_alert": "15", "F1_API_BASE": BASE, "F1_TEST_NO_OPEN": "1", "F1_NOW": "2026-09-26T15:00:00Z", "TZ": "Europe/London"}
+    e.update(extra)
+    return e
+
+
+def run_alfred(args, cache=None, **extra):
+    cache = cache or os.path.join(new_cache(), "Caches", "com.runningwithcrayons.Alfred", "Workflow Data", "io.github.x-o-r-r-o.f1")
+    out = subprocess.run(["/bin/bash", "-c", 'osascript -l JavaScript ./f1.js "$@"', "_", *args], cwd=SRC,
+                         env=alfred_env(cache, **extra), capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+class Round4Tests(Base):
+    def test_same_as_macos_formats_without_lang(self):
+        # Alfred runs scripts without LANG: the region settings must still decide 12/24 h and day/month order
+        cases = {"en_US": "Fri Oct 2 5:30 AM", "en_GB": "Fri 2 Oct 05:30", "de_DE": "Fri 2 Oct 05:30",
+                 "zh_TW": "Fri Oct 2 5:30 AM",   # 12-hour with a "B" day period, no "a" in the pattern
+                 "hi_IN": "Fri 2 Oct 5:30 AM", "ur_PK": "Fri 2 Oct 5:30 AM",
+                 "fa_IR": "Fri 2 Oct 05:30",      # stand-alone month "LLL" after the day
+                 "fr_CA": "Fri 2 Oct 05:30", "ja_JP": "Fri Oct 2 05:30"}
+        for loc, when in cases.items():
+            items = json.loads(run_alfred(["race", ""], F1_LOCALE=loc))["items"]
+            self.assertEqual(items[1]["title"], "Practice 1  ·  " + when, loc)
+        # without an override the user's own region is used, and the output is still valid
+        items = json.loads(run_alfred(["race", ""]))["items"]
+        self.assertRegex(items[1]["title"], r"^Practice 1  ·  Fri (2 Oct|Oct 2) (05:30|5:30 AM)$")
+
+    def test_actions_print_nothing_on_success(self):
+        cache = new_cache()
+        sf("", cache=cache)
+        self.assertEqual(run_alfred(["act", "open:https://www.formula1.com/"], cache=cache), "")
+        self.assertEqual(run_alfred(["act", "ics:2026:16:all"], cache=cache), "")
+        self.assertEqual(run_alfred(["act", "copy:x"], cache=cache), "Copied to the clipboard\n")
+
+    def test_keyword_with_spaces_or_empty(self):
+        cache = new_cache()
+        for value, shown in (("  gp ", "gp"), ("", "race"), ("Rennen", "Rennen")):
+            items = json.loads(run_alfred(["race", ""], cache=cache, keyword_race=value))["items"]
+            self.assertTrue(find(items, "Driver Standings")["subtitle"].endswith(f" · {shown} drivers"), value)
+
+
 class PlistTests(unittest.TestCase):
     def test_build_and_plist(self):
         subprocess.run([sys.executable, "tools/build.py"], cwd=ROOT, check=True, capture_output=True)
