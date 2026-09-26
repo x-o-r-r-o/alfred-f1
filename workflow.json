@@ -37,7 +37,7 @@
       "type": "popupbutton",
       "variable": "time_format",
       "label": "Time format",
-      "description": "",
+      "description": "Session times, shown in your local time zone",
       "config": {
         "default": "system",
         "pairs": [
@@ -51,7 +51,7 @@
       "type": "popupbutton",
       "variable": "date_format",
       "label": "Date format",
-      "description": "",
+      "description": "Order of the day and month in session dates",
       "config": {
         "default": "system",
         "pairs": [

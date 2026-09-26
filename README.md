@@ -42,6 +42,7 @@ See every round of the season via `race schedule`, with the winners of past race
 
 * <kbd>↩</kbd> Open the race page.
 * <kbd>⌘</kbd><kbd>↩</kbd> Add every session of the weekend to Calendar.
+* <kbd>⌥</kbd><kbd>↩</kbd> Open the other race page.
 
 ### Past Seasons
 

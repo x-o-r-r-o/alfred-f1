@@ -238,6 +238,7 @@ See every round of the season via `race schedule`, with the winners of past race
 
 * &lt;kbd&gt;↩&lt;/kbd&gt; Open the race page.
 * &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;↩&lt;/kbd&gt; Add every session of the weekend to Calendar.
+* &lt;kbd&gt;⌥&lt;/kbd&gt;&lt;kbd&gt;↩&lt;/kbd&gt; Open the other race page.
 
 ### Past Seasons
 
@@ -353,7 +354,7 @@ The keyword, race page, time and date format, and Calendar alert can be changed 
 				</array>
 			</dict>
 			<key>description</key>
-			<string></string>
+			<string>Session times, shown in your local time zone</string>
 			<key>label</key>
 			<string>Time format</string>
 			<key>type</key>
@@ -383,7 +384,7 @@ The keyword, race page, time and date format, and Calendar alert can be changed 
 				</array>
 			</dict>
 			<key>description</key>
-			<string></string>
+			<string>Order of the day and month in session dates</string>
 			<key>label</key>
 			<string>Date format</string>
 			<key>type</key>

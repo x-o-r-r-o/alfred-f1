@@ -472,11 +472,11 @@ class CacheTests(Base):
         Mock.mode = "down"
         it = sf("drivers")
         self.assertEqual(it[0]["title"], "Couldn’t load the driver standings")
-        self.assertEqual(it[0]["subtitle"], "The F1 API returned HTTP 503")
+        self.assertEqual(it[0]["subtitle"], "The F1 API returned HTTP 503 · Try again in a few minutes")
         Mock.mode = "429"
         self.assertIn("rate limiting", sf("drivers")[0]["subtitle"])
         Mock.mode = "html"
-        self.assertEqual(sf("drivers")[0]["subtitle"], "Unexpected response from the F1 API")
+        self.assertEqual(sf("drivers")[0]["subtitle"], "Unexpected response from the F1 API · Try again in a few minutes")
 
     def test_no_network(self):
         it = sf("", F1_API_BASE="http://127.0.0.1:9/ergast/f1")
@@ -689,7 +689,7 @@ class AuditPass2Tests(Base):
         with open(os.path.join(SRC, "f1.js")) as fh:
             js = fh.read()
         def keys(name):
-            body = re.search(name + r" = \{(.*?)\};", js, re.S).group(1)
+            body = re.search(name + r" = (?:dict\()?\{(.*?)\}\)?;", js, re.S).group(1)
             return set(k.strip('"') for k in re.findall(r'("[^"]+"|[a-z]+):', body))
         nat, country = keys("NATIONALITY"), keys("COUNTRY")
         # every value the API has used (drivers, constructors and circuits since 1950)
@@ -977,6 +977,87 @@ class AuditPass4Tests(Base):
         self.assertEqual(it[1]["title"], "Practice 1  ·  Fri Oct 2 05:30")
         it = sf("", now="2025-12-20T12:00:00Z", date_format="mdy")
         self.assertEqual(it[1]["title"], "Practice 1  ·  Fri Mar 6, 2026 01:30")
+
+
+class FinalReviewTests(Base):
+    """Cross-workflow bug classes: prototype keys, display strings, corrupt caches, past-season TTL, test mode."""
+
+    def test_prototype_keys_in_queries_and_api_data(self):
+        for q in ("__proto__", "toString", "hasOwnProperty", "results __proto__"):
+            self.assertTrue(sf(q))  # no crash, valid JSON
+        self.assertEqual(sf("constructor")[0]["title"], "2026 Constructors’ Championship")  # a real alias
+        drv, con, races = fixture("2026/driverstandings"), fixture("2026/constructorstandings"), fixture("2026/races")
+        drv["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"][0]["Constructors"][0]["constructorId"] = "constructor"
+        con["MRData"]["StandingsTable"]["StandingsLists"][0]["ConstructorStandings"][0]["Constructor"]["constructorId"] = "constructor"
+        drv["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"][0]["Driver"]["nationality"] = "__proto__"
+        races["MRData"]["RaceTable"]["Races"][15]["Circuit"]["circuitId"] = "constructor"
+        Mock.overrides.update({"2026/driverstandings": drv, "2026/constructorstandings": con, "2026/races": races})
+        self.assertNotEqual(sf("teams")[0]["icon"]["path"], "icons/error.png")
+        self.assertTrue(sf("drivers")[1]["title"].startswith("1. "))
+        head = sf("")[0]
+        self.assertNotIn("function", head["arg"])
+        self.assertTrue(head["arg"].startswith("open:https://en.wikipedia.org/"))
+
+    def test_titles_drop_bidi_control_and_lone_surrogates(self):
+        drv = fixture("2026/driverstandings")
+        d = drv["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"][0]["Driver"]
+        d["givenName"] = "Evil\u202e\u2066Name\x07\x85"
+        d["familyName"] = "Half\ud83d"
+        Mock.overrides["2026/driverstandings"] = drv
+        cache = new_cache()
+        raw = run_js(["race", "drivers"], cache, "2026-09-26T15:00:00Z")
+        self.assertNotRegex(raw, r"\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])")  # no unpaired surrogate escapes
+        it = json.loads(raw)["items"]
+        for i in it:
+            for field in (i["title"], i["subtitle"]):
+                self.assertFalse(re.search("[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\ud800-\udfff]", field), field)
+        self.assertEqual(it[1]["title"], "1. 🇮🇹 Evil  Name   Half\ufffd  #12")
+        # the query is echoed in "no match" titles
+        t = sf("drivers \u202exyz")[1]["title"]
+        self.assertNotIn("\u202e", t)
+
+    def test_corrupt_cache_values_are_refetched(self):
+        for bad in ("[]", "null", "42", '"x"'):
+            cache = new_cache()
+            os.makedirs(os.path.join(cache, "api"))
+            with open(cache_file(cache, "2026/races"), "w") as fh:
+                fh.write(bad)
+            n = len(Mock.hits)
+            self.assertEqual(sf("", cache=cache)[0]["title"], "🇲🇾 Bahrain Grand Prix in Malaysia", bad)
+            self.assertEqual(len(Mock.hits), n + 1)
+
+    def test_past_season_cached_mid_season_is_not_kept_for_30_days(self):
+        # 2026 standings cached in September must not stand in for the final standings in January 2027
+        cache = new_cache()
+        sf("2026 drivers", cache=cache)
+        f = cache_file(cache, "2026/driverstandings")
+        age(f, 30 * 60)
+        n = Mock.hits.count("2026/driverstandings")
+        sf("2026 drivers", cache=cache, now="2027-01-10T12:00:00Z", F1_SYNC="1")
+        self.assertEqual(Mock.hits.count("2026/driverstandings"), n)  # still fresh for an hour
+        age(f, 2 * 3600)
+        sf("2026 drivers", cache=cache, now="2027-01-10T12:00:00Z", F1_SYNC="1")
+        self.assertEqual(Mock.hits.count("2026/driverstandings"), n + 1)
+        # data fetched after the season ended keeps the long TTL
+        age(f, 2 * 3600)
+        n = len(Mock.hits)
+        sf("2025 drivers", cache=cache)
+        age(cache_file(cache, "2025/driverstandings"), 5 * 86400)
+        n = len(Mock.hits)
+        sf("2025 drivers", cache=cache, F1_SYNC="1")
+        self.assertEqual(len(Mock.hits), n)
+
+    def test_copied_tables_use_singular_points(self):
+        head = sf("drivers")[0]
+        self.assertIn("Yuki Tsunoda (RB F1 Team) 1 pt\n", head["arg"])
+        self.assertNotIn(" 1 pts", head["arg"])
+
+    def test_test_mode_never_uses_the_real_api(self):
+        e = {k: v for k, v in os.environ.items() if k not in ("F1_API_BASE", "F1_TEST_NO_OPEN", "F1_SYNC")}
+        e.update(alfred_workflow_cache=new_cache(), F1_NOW="2026-09-26T15:00:00Z", TZ="Europe/London")
+        out = subprocess.run(["osascript", "-l", "JavaScript", "./f1.js", "race", "drivers"], cwd=SRC, env=e,
+                             capture_output=True, text=True, timeout=60)
+        self.assertIn("Test mode: F1_API_BASE is not set", out.stdout)
 
 
 class PlistTests(unittest.TestCase):

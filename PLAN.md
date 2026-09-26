@@ -27,7 +27,7 @@ Raycast demand this workflow replaces (downloads, 2026-09-26):
 - [x] Tests: real API fixtures, mock HTTP server (`F1_API_BASE`), injectable clock (`F1_NOW`), time zones and DST (`TZ`)
 
 ## Tech
-- **Stack:** JXA (`src/f1.js`) + `/usr/bin/curl`; Jolpica (Ergast successor) API, `api.jolpi.ca/ergast/f1/…` (≤ 100 rows per page, 4 req/s burst and 500 req/h sustained: every response is cached, and a request log shared by all processes caps the workflow at 3 req/s and 400 req/h, pausing for a minute after any HTTP 429). OpenF1 is not needed: Jolpica carries every session time.
+- **Stack:** JXA (`src/f1.js`) + `/usr/bin/curl`; Jolpica (Ergast successor) API, `api.jolpi.ca/ergast/f1/…` (≤ 100 rows per page, 4 req/s burst and 500 req/h sustained: every response is cached, and a request log shared by all processes caps the workflow at 2 requests per 1.25 s and 400 req/h, pausing for a minute after any HTTP 429). OpenF1 is not needed: Jolpica carries every session time.
 - **Dependencies:** None.
 - Output via Alfred Script Filter JSON; settings via Workflow Configuration (`userconfigurationconfig`).
 - Secrets (API keys/tokens) in the macOS Keychain, never in `prefs.plist`.
@@ -38,6 +38,19 @@ Raycast demand this workflow replaces (downloads, 2026-09-26):
 2. Actions + modifiers, Universal Actions / File Actions where relevant
 3. Workflow Configuration, icons, error states (no network / missing dependency)
 4. README with screenshots, `python3 tools/build.py --package` release, forum post, then Gallery submission when invited
+
+## Known limitations
+- Session times and results come from Jolpica, which updates results a few hours after a session; live timing is out of scope.
+- formula1.com race pages use a slug table (2018 onwards); a new circuit without a slug falls back to Wikipedia.
+- Session durations (for "live" markers and calendar events) are nominal: FP 60 min, sprint qualifying 45 min, qualifying 60 min, race 120 min (a race stays "next" for 3 h after the start).
+- The rate-limiter mutex takes over a lock older than 3 s; two processes that find the same stale lock at the same instant could both pass once (harmless: at most one extra request).
+
+## Verify in real Alfred
+- [ ] Hotkey opens the next race weekend; Tab autocompletion on menu, switch and schedule rows.
+- [ ] Background refresh survives the next keystroke (rerun 0.5 s) and the stale-data notice disappears afterwards.
+- [ ] ⌘↩ opens the .ics in Calendar with the alert from the Workflow’s Configuration; ⌘C and ⌘L on sessions.
+- [ ] Flags and team colour icons render; "Same as macOS" time/date formats follow the region settings.
+- [ ] The notification after ⌘↩ on a standings/results row says "Copied to the clipboard".
 
 ## Release checklist (Alfred forum + Gallery)
 Sources: alfred.app/submit, alfred.app/submit/styleguide, alfred.app/submit/screenshots, alfredforum.com topics 23976 and 23388.

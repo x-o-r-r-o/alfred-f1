@@ -13,7 +13,10 @@ function env(name, fallback) {
   return v.isNil() ? fallback : v.js;
 }
 
-const API_BASE = env("F1_API_BASE", "https://api.jolpi.ca/ergast/f1").replace(/\/+$/, "");
+// Test mode (any test override set): never reach the real API, open anything or touch the clipboard,
+// even if the harness forgets one of the overrides.
+const TEST_MODE = ["F1_NOW", "F1_API_BASE", "F1_SYNC", "F1_TEST_NO_OPEN"].some((k) => env(k, "") !== "");
+const API_BASE = env("F1_API_BASE", TEST_MODE ? "" : "https://api.jolpi.ca/ergast/f1").replace(/\/+$/, "");
 const UA = "alfred-f1/1.0 (+https://github.com/x-o-r-r-o/alfred-f1)";
 const PAGE = 100; // Jolpica's maximum page size
 const MIN = 60, HOUR = 3600, DAY = 86400;
@@ -80,11 +83,27 @@ function info(title, subtitle, icon = "info", extra = {}) {
   return Object.assign({ title, subtitle: subtitle || "", valid: false, icon: { path: `icons/${icon}.png` } }, extra);
 }
 
+// Display strings: no control or bidi-override characters, no unpaired surrogates (Alfred rejects the JSON).
+function clean(s) {
+  return typeof s === "string" ? wellFormed(s).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ") : s;
+}
+
 function output(items) {
   const all = NOTICES.concat(items);
+  for (const it of all) {
+    it.title = clean(it.title);
+    it.subtitle = clean(it.subtitle);
+    for (const m of Object.values(it.mods || {})) m.subtitle = clean(m.subtitle);
+  }
   const out = { skipknowledge: true, items: all };
   if (RERUN) out.rerun = RERUN;
-  return JSON.stringify(out);
+  // no unpaired surrogates anywhere (arg, text.copy…): Alfred rejects the whole JSON otherwise
+  return JSON.stringify(out, (k, v) => (typeof v === "string" ? wellFormed(v) : v));
+}
+
+// Lookup tables keyed by user or API strings: no prototype, so "constructor" or "__proto__" find nothing.
+function dict(o) {
+  return Object.assign(Object.create(null), o);
 }
 
 function kw() {
@@ -93,7 +112,7 @@ function kw() {
 
 // ---------- flags ----------
 
-const NATIONALITY = {
+const NATIONALITY = dict({
   american: "US", "american-italian": "US", argentine: "AR", argentinian: "AR", "argentine-italian": "AR", australian: "AU",
   austrian: "AT", belgian: "BE", brazilian: "BR", british: "GB", canadian: "CA", chilean: "CL", chinese: "CN",
   colombian: "CO", czech: "CZ", danish: "DK", dutch: "NL", "east german": "DE", emirati: "AE", estonian: "EE",
@@ -102,8 +121,8 @@ const NATIONALITY = {
   monegasque: "MC", moroccan: "MA", "new zealander": "NZ", polish: "PL", portuguese: "PT", rhodesian: "ZW",
   russian: "RU", "south african": "ZA", spanish: "ES", swedish: "SE", swiss: "CH", thai: "TH", uruguayan: "UY",
   venezuelan: "VE", korean: "KR", "south korean": "KR", saudi: "SA", qatari: "QA", singaporean: "SG",
-};
-const COUNTRY = {
+});
+const COUNTRY = dict({
   argentina: "AR", australia: "AU", austria: "AT", azerbaijan: "AZ", bahrain: "BH", belgium: "BE", brazil: "BR",
   canada: "CA", china: "CN", france: "FR", germany: "DE", hungary: "HU", india: "IN", italy: "IT", japan: "JP",
   korea: "KR", "south korea": "KR", malaysia: "MY", mexico: "MX", monaco: "MC", morocco: "MA", netherlands: "NL",
@@ -111,7 +130,7 @@ const COUNTRY = {
   spain: "ES", sweden: "SE", switzerland: "CH", turkey: "TR", uae: "AE", "united arab emirates": "AE",
   uk: "GB", "united kingdom": "GB", "great britain": "GB", usa: "US", "united states": "US", vietnam: "VN",
   thailand: "TH", rwanda: "RW",
-};
+});
 
 function flagOf(code) {
   if (!code || !/^[A-Z]{2}$/.test(code)) return "";
@@ -280,7 +299,7 @@ function whenText(s, withYear) {
 
 // ---------- links ----------
 
-const F1_SLUGS = {
+const F1_SLUGS = dict({
   albert_park: "australia", shanghai: "china", suzuka: "japan", bahrain: "bahrain", jeddah: "saudi-arabia",
   miami: "miami", imola: "emiliaromagna", monaco: "monaco", catalunya: "spain", villeneuve: "canada",
   red_bull_ring: "austria", silverstone: "great-britain", spa: "belgium", hungaroring: "hungary",
@@ -288,7 +307,7 @@ const F1_SLUGS = {
   rodriguez: "mexico", interlagos: "brazil", vegas: "las-vegas", losail: "qatar", yas_marina: "united-arab-emirates",
   madring: "spain", ricard: "france", portimao: "portugal", istanbul: "turkey", sochi: "russia", mugello: "tuscany",
   nurburgring: "eifel", sepang: "malaysia", hockenheimring: "germany",
-};
+});
 
 function f1Url(race) {
   let slug = F1_SLUGS[race.Circuit && race.Circuit.circuitId];
@@ -405,6 +424,7 @@ function throttle() {
 
 // One GET. Returns { data } (MRData) or { error, status }.
 function httpGet(url) {
+  if (!/^https?:\/\//.test(url)) return { error: "Test mode: F1_API_BASE is not set", status: 0 };
   const blocked = throttle();
   if (blocked) return blocked;
   const r = run_("/usr/bin/curl", ["-sS", "-L", "--compressed", "--connect-timeout", "4", "--max-time", "12", "-A", UA, "-H", "Accept: application/json", "-w", "\n%{http_code}", url]);
@@ -571,9 +591,12 @@ function staleNotice(age, error, status) {
 
 // Cached GET: fresh cache → cached data; stale → cached data + background refresh; none → fetch now.
 // Returns { data } or { error }.
-function api(path, ttl) {
+function api(path, ttl, season) {
   const file = cacheFile(path);
   const age = fileAge(file);
+  // a past season's long TTL only holds for data fetched after that season ended (not, say, standings
+  // cached before its final race)
+  if (season && ttl > HOUR && age !== null && Date.now() - age * 1000 < Date.UTC(season + 1, 0, 1)) ttl = HOUR;
   const cached = age === null ? null : readFile(file);
   let data = null;
   if (cached) {
@@ -582,6 +605,7 @@ function api(path, ttl) {
     } catch (e) {
       data = null;
     }
+    if (!data || typeof data !== "object" || Array.isArray(data)) data = null; // corrupt: fetch again
   }
   if (data && age < ttl) return { data };
   if (data) {
@@ -631,8 +655,9 @@ function lastAttempt(file) {
 
 function errorItems(r, what) {
   const offline = r.status === 0;
+  const hint = /try again/i.test(r.error || "") ? "" : offline ? " · Check your connection, then type again" : " · Try again in a few minutes";
   return [
-    info(offline ? "Can’t reach the Formula 1 API" : `Couldn’t load ${what}`, r.error, offline ? "offline" : "error"),
+    info(offline ? "Can’t reach the Formula 1 API" : `Couldn’t load ${what}`, `${r.error}${hint}`, offline ? "offline" : "error"),
   ];
 }
 
@@ -641,7 +666,7 @@ function pastSeason(year) {
 }
 
 function schedule(year) {
-  const r = api(`${year}/races`, pastSeason(year) ? 30 * DAY : DAY);
+  const r = api(`${year}/races`, pastSeason(year) ? 30 * DAY : DAY, year);
   if (r.error) return r;
   return { races: (r.data.RaceTable && r.data.RaceTable.Races) || [] };
 }
@@ -672,7 +697,8 @@ function cachedJSON(path) {
   const txt = readFile(cacheFile(path));
   if (!txt) return null;
   try {
-    return JSON.parse(txt);
+    const j = JSON.parse(txt);
+    return j && typeof j === "object" && !Array.isArray(j) ? j : null;
   } catch (e) {
     return null;
   }
@@ -683,7 +709,7 @@ function sessionResults(year, round, kind, races) {
   // an empty response means the results aren't published yet: re-check it every 10 minutes
   const c = cachedJSON(path);
   const empty = !!(c && c.RaceTable && !(c.RaceTable.Races || []).length);
-  const r = api(path, resultsTtl(year, races, empty));
+  const r = api(path, resultsTtl(year, races, empty), year);
   if (r.error) return r;
   const race = (r.data.RaceTable && r.data.RaceTable.Races || [])[0];
   return { race: race || null, rows: race ? race[RESULT_KEYS[kind]] || [] : [] };
@@ -693,7 +719,7 @@ function standings(year, which) {
   const path = `${year}/${which}standings`;
   const c = cachedJSON(path);
   const empty = !!(c && c.StandingsTable && !(c.StandingsTable.StandingsLists || []).length);
-  const r = api(path, empty ? 10 * MIN : pastSeason(year) ? 30 * DAY : HOUR);
+  const r = api(path, empty ? 10 * MIN : pastSeason(year) ? 30 * DAY : HOUR, year);
   if (r.error) return r;
   const lists = (r.data.StandingsTable && r.data.StandingsTable.StandingsLists) || [];
   const l = lists[lists.length - 1];
@@ -711,7 +737,7 @@ const COMMANDS = [
   ["sprint", "Sprint Results", "Last sprint classification", "sprint"],
   ["schedule", "Season Schedule", "Every round with winners and upcoming races", "calendar"],
 ];
-const ALIASES = {
+const ALIASES = dict({
   drivers: "drivers", driver: "drivers", wdc: "drivers", standings: "drivers",
   teams: "teams", team: "teams", constructors: "teams", constructor: "teams", wcc: "teams",
   results: "results", result: "results", res: "results", winner: "results",
@@ -719,7 +745,7 @@ const ALIASES = {
   sprint: "sprint", sprints: "sprint",
   schedule: "schedule", calendar: "schedule", cal: "schedule", season: "schedule", races: "schedule",
   next: "next",
-};
+});
 
 function menuItems(year, filter) {
   const pre = year ? `${year} ` : "";
@@ -847,7 +873,7 @@ function driverStandingItems(year, filter) {
   if (!st.rows.length) return [info(`No driver standings for ${year}`, "The season may not have started yet", "info")];
   const leader = +st.rows[0].points;
   const second = st.rows[1] ? +st.rows[1].points : leader;
-  const table = st.rows.map((r) => `${r.positionText || r.position}. ${driverName(r.Driver)} (${(r.Constructors || []).map((c) => c.name).join(", ")}) ${r.points} pts`).join("\n");
+  const table = st.rows.map((r) => `${r.positionText || r.position}. ${driverName(r.Driver)} (${(r.Constructors || []).map((c) => c.name).join(", ")}) ${ptsText(+r.points)}`).join("\n");
   const f = fold(filter).trim();
   const items = [];
   if (note) items.push(note);
@@ -877,7 +903,7 @@ function driverStandingItems(year, filter) {
     // permanentNumber is the driver's number today, so only show it for the current season
     const num = d.permanentNumber && year >= THIS_YEAR ? `  #${d.permanentNumber}` : "";
     const title = `${pos}. ${withFlag(natFlag(d.nationality), driverName(d))}${num}`;
-    const text = `${pos}. ${driverName(d)} (${teamText}) ${r.points} pts, ${plural(+r.wins, "win")}`;
+    const text = `${pos}. ${driverName(d)} (${teamText}) ${ptsText(+r.points)}, ${plural(+r.wins, "win")}`;
     const url = safeUrl(d.url);
     items.push({
       title: r.positionText === "D" ? `DSQ ${withFlag(natFlag(d.nationality), driverName(d))}` : title,
@@ -935,7 +961,7 @@ function teamStandingItems(year, filter) {
   if (st.error) return errorItems(st, "the team standings");
   if (!st.rows.length) return [info(`No team standings for ${year}`, year < 1958 ? "The constructors’ championship started in 1958" : "The season may not have started yet", "info")];
   const drivers = standings(year, "driver");
-  const byTeam = {};
+  const byTeam = Object.create(null);
   if (!drivers.error) {
     for (const r of drivers.rows) {
       for (const c of r.Constructors || []) (byTeam[c.constructorId] = byTeam[c.constructorId] || []).push(r.Driver.familyName);
@@ -943,7 +969,7 @@ function teamStandingItems(year, filter) {
   }
   const leader = +st.rows[0].points;
   const second = st.rows[1] ? +st.rows[1].points : leader;
-  const table = st.rows.map((r) => `${r.positionText || r.position}. ${r.Constructor.name} ${r.points} pts`).join("\n");
+  const table = st.rows.map((r) => `${r.positionText || r.position}. ${r.Constructor.name} ${ptsText(+r.points)}`).join("\n");
   const items = [];
   if (note) items.push(note);
   items.push({
@@ -963,7 +989,7 @@ function teamStandingItems(year, filter) {
     const pos = /^\d+$/.test(r.positionText || "") ? r.positionText : r.position || "–";
     const gap = gapText(pos, pts, leader, second, st.rows.length);
     const ds = byTeam[c.constructorId] || [];
-    const text = `${pos}. ${c.name} ${r.points} pts, ${plural(+r.wins, "win")}`;
+    const text = `${pos}. ${c.name} ${ptsText(+r.points)}, ${plural(+r.wins, "win")}`;
     const url = safeUrl(c.url);
     items.push({
       title: `${pos}. ${withFlag(natFlag(c.nationality), c.name)}`,
@@ -986,7 +1012,7 @@ const KINDS = {
   qualifying: { label: "Qualifying", session: "Qualifying", icon: "quali" },
   sprint: { label: "Sprint", session: "Sprint", icon: "sprint" },
 };
-const STATUS_CODES = { R: "DNF", D: "DSQ", E: "EX", W: "DNS", F: "DNQ", N: "NC" };
+const STATUS_CODES = dict({ R: "DNF", D: "DSQ", E: "EX", W: "DNS", F: "DNQ", N: "NC" });
 
 function lapMs(t) {
   // "1:42.526" or "42.526" → milliseconds
@@ -1119,7 +1145,7 @@ function classification(race, res, kind, races, year) {
       else if (/^\d+$/.test(pt)) summary = r.status || "";
       else {
         // retired cars sometimes keep a "Finished"/"Lapped" status: say what the position code means
-        const st = !r.status || /^(Finished|Lapped|\+\d+ Laps?)$/.test(r.status) ? { DNF: "Retired", DSQ: "Disqualified", DNS: "Did not start", NC: "Not classified", EX: "Excluded", DNQ: "Did not qualify" }[STATUS_CODES[pt]] || r.status || "" : r.status;
+        const st = !r.status || /^(Finished|Lapped|\+\d+ Laps?)$/.test(r.status) ? dict({ DNF: "Retired", DSQ: "Disqualified", DNS: "Did not start", NC: "Not classified", EX: "Excluded", DNQ: "Did not qualify" })[STATUS_CODES[pt]] || r.status || "" : r.status;
         summary = `${st}${r.laps && +r.laps > 0 ? ` (lap ${r.laps})` : ""}`;
       }
       parts.push(summary);
@@ -1200,10 +1226,10 @@ function scheduleItems(year, filter) {
   if (!races.length) return [info(`The ${year} calendar hasn’t been published yet`, "Try again closer to the season", "season")];
   const pre = +year === THIS_YEAR ? "" : `${year} `;
   const anyDone = races.some(raceOver);
-  const winners = {};
+  const winners = Object.create(null);
   let winnersError = null;
   if (anyDone) {
-    const w = api(`${year}/results/1`, resultsTtl(year, races, false));
+    const w = api(`${year}/results/1`, resultsTtl(year, races, false), year);
     if (w.error) winnersError = w;
     else for (const r of (w.data.RaceTable && w.data.RaceTable.Races) || []) if (r.Results && r.Results[0] && r.Results[0].Driver) winners[r.round] = r.Results[0];
   }
@@ -1366,7 +1392,7 @@ function openURL(url) {
   if (!/^https?:\/\/[^\s]+$/.test(url)) return "Invalid link";
   const u = $.NSURL.URLWithString(url);
   if (u.isNil()) return "Invalid link";
-  if (env("F1_TEST_NO_OPEN", "") !== "1") $.NSWorkspace.sharedWorkspace.openURL(u);
+  if (!TEST_MODE) $.NSWorkspace.sharedWorkspace.openURL(u);
   return "";
 }
 
@@ -1377,7 +1403,7 @@ function act(arg) {
   if (kind === "open") return openURL(rest);
   if (kind === "copy") {
     const pb = $.NSPasteboard.generalPasteboard;
-    if (env("F1_TEST_NO_OPEN", "") !== "1") {
+    if (!TEST_MODE) {
       pb.clearContents;
       pb.setStringForType($(rest), $.NSPasteboardTypeString);
     }
@@ -1398,7 +1424,7 @@ function act(arg) {
     pruneCache(false);
     const file = `${dir}/f1-${p[1]}-${p[2]}-${p[3]}.ics`;
     if (!writeFile(file, buildIcs(race, sessions))) return "Could not write the calendar file";
-    if (env("F1_TEST_NO_OPEN", "") !== "1") $.NSWorkspace.sharedWorkspace.openURL($.NSURL.fileURLWithPath(file));
+    if (!TEST_MODE) $.NSWorkspace.sharedWorkspace.openURL($.NSURL.fileURLWithPath(file));
     return "";
   }
   return "";
