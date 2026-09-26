@@ -605,6 +605,47 @@ class ActionTests(Base):
         self.assertEqual(act("copy:hello\n\"world\"", cache), "Copied to the clipboard")
 
 
+class AuditRegressionTests(Base):
+    """One test per bug found while auditing."""
+
+    # --- pass 1 ---
+    def test_january_before_calendar_is_published(self):
+        Mock.overrides["2027/races"] = fixture("2027/races")
+        it = sf("", now="2027-01-10T12:00:00Z")
+        self.assertEqual(it[0]["subtitle"], "The 2027 calendar hasn’t been published yet")
+        self.assertEqual(find(it, "Last race")["autocomplete"], "2026 results 23 ")
+        self.assertNotIn("2028/races", Mock.hits)
+
+    def test_singular_point(self):
+        self.assertEqual(find(sf("drivers"), "20. ")["subtitle"].split(" · ")[0], "1 pt")
+        self.assertIn("+1 pt ", find(sf("results 14"), "10. ")["subtitle"] + " ")
+
+    def test_tie_for_the_lead(self):
+        doc = fixture("2026/driverstandings")
+        rows = doc["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"]
+        rows[1]["points"] = rows[0]["points"]
+        Mock.overrides["2026/driverstandings"] = doc
+        it = sf("drivers")
+        self.assertTrue(it[1]["subtitle"].endswith("level on points"))
+        self.assertTrue(it[2]["subtitle"].endswith("level on points with the leader"))
+
+    def test_retired_car_with_lapped_status(self):
+        # the API marks Hülkenberg's sprint retirement as position "R" with status "Lapped"
+        self.assertEqual(find(sf("sprint 12"), "DNF 🇩🇪")["subtitle"], "Audi · Retired (lap 7) · grid 14")
+
+    def test_disqualified_in_standings(self):
+        doc = fixture("2026/driverstandings")
+        row = doc["MRData"]["StandingsTable"]["StandingsLists"][0]["DriverStandings"][2]
+        row["positionText"] = "D"
+        del row["position"]
+        Mock.overrides["2026/driverstandings"] = doc
+        self.assertEqual(sf("drivers")[3]["title"], "DSQ 🇬🇧 Lewis Hamilton")
+
+    def test_year_anywhere_in_query(self):
+        self.assertEqual(sf("drivers 2021")[0]["title"], "2021 Drivers’ Championship")
+        self.assertEqual(sf("results 2021 10 sprint")[0]["title"], "🇬🇧 British Grand Prix · Sprint")
+
+
 class PlistTests(unittest.TestCase):
     def test_build_and_plist(self):
         subprocess.run([sys.executable, "tools/build.py"], cwd=ROOT, check=True, capture_output=True)

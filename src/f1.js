@@ -641,6 +641,14 @@ function nextRaceItems() {
   if (sch.error) return errorItems(sch, "the schedule").concat(menuItems(null, ""));
   let races = sch.races, total = races.length;
   let race = races.find((r) => !raceOver(r));
+  if (!races.length) {
+    // January: this season's calendar isn't out yet; point at last season's final race
+    const prev = schedule(THIS_YEAR - 1);
+    const items = [info("Off-season: no upcoming races", `The ${THIS_YEAR} calendar hasn’t been published yet`, "season")];
+    const last = !prev.error && prev.races[prev.races.length - 1];
+    if (last) items.push(info(`Last race: ${withFlag(countryFlag(last.Circuit.Location.country), last.raceName)}`, `${fmtDay(dateOnly(last.date), true)} · Tab for the results`, "results", { autocomplete: `${last.season} results ${last.round} ` }));
+    return items.concat(menuItems(null, ""));
+  }
   if (!race) {
     const nxt = schedule(THIS_YEAR + 1);
     if (!nxt.error && nxt.races.length) {
@@ -703,7 +711,7 @@ function driverStandingItems(year, filter) {
     const current = teams[teams.length - 1];
     const pts = +r.points;
     const pos = /^\d+$/.test(r.positionText || "") ? r.positionText : r.position || "–";
-    const gap = pos === "1" ? (st.rows.length > 1 ? `leads by ${fmtPts(pts - second)}` : "leader") : `−${fmtPts(leader - pts)} to the leader`;
+    const gap = gapText(pos, pts, leader, second, st.rows.length);
     const teamText = teams.map((c) => c.name).join(" → ");
     // permanentNumber is the driver's number today, so only show it for the current season
     const num = d.permanentNumber && year >= THIS_YEAR ? `  #${d.permanentNumber}` : "";
@@ -712,7 +720,7 @@ function driverStandingItems(year, filter) {
     const url = /^https?:/.test(d.url || "") ? d.url.replace(/^http:/, "https:") : "";
     items.push({
       title: r.positionText === "D" ? `DSQ ${withFlag(natFlag(d.nationality), driverName(d))}` : title,
-      subtitle: `${fmtPts(pts)} pts · ${plural(+r.wins, "win")} · ${teamText || "—"} · ${gap}`,
+      subtitle: `${ptsText(pts)} · ${plural(+r.wins, "win")} · ${teamText || "—"} · ${gap}`,
       arg: url ? `open:${url}` : "",
       valid: !!url,
       quicklookurl: url || undefined,
@@ -726,6 +734,16 @@ function driverStandingItems(year, filter) {
 
 function fmtPts(n) {
   return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, "");
+}
+function ptsText(n) {
+  return `${fmtPts(n)} ${n === 1 ? "pt" : "pts"}`;
+}
+// "leads by 12" / "−40 to the leader" / "level on points"
+function gapText(pos, pts, leader, second, count) {
+  if (count < 2) return "leader";
+  if (pos === "1") return pts === second ? "level on points" : `leads by ${fmtPts(pts - second)}`;
+  if (pts === leader) return "level on points with the leader";
+  return `−${fmtPts(leader - pts)} to the leader`;
 }
 
 // A season's standings are final once the last scheduled round is in (only if the schedule is cached).
@@ -782,13 +800,13 @@ function teamStandingItems(year, filter) {
   for (const r of rows) {
     const c = r.Constructor, pts = +r.points;
     const pos = /^\d+$/.test(r.positionText || "") ? r.positionText : r.position || "–";
-    const gap = pos === "1" ? (st.rows.length > 1 ? `leads by ${fmtPts(pts - second)}` : "leader") : `−${fmtPts(leader - pts)} to the leader`;
+    const gap = gapText(pos, pts, leader, second, st.rows.length);
     const ds = byTeam[c.constructorId] || [];
     const text = `${pos}. ${c.name} ${r.points} pts, ${plural(+r.wins, "win")}`;
     const url = /^https?:/.test(c.url || "") ? c.url.replace(/^http:/, "https:") : "";
     items.push({
       title: `${pos}. ${withFlag(natFlag(c.nationality), c.name)}`,
-      subtitle: [`${fmtPts(pts)} pts`, plural(+r.wins, "win"), ds.join(", "), gap].filter(Boolean).join(" · "),
+      subtitle: [ptsText(pts), plural(+r.wins, "win"), ds.join(", "), gap].filter(Boolean).join(" · "),
       arg: url ? `open:${url}` : "",
       valid: !!url,
       quicklookurl: url || undefined,
@@ -933,9 +951,13 @@ function classification(race, res, kind, races, year) {
       if (/^\d+$/.test(pt) && lapped) summary = `+${plural(winnerLaps - +r.laps, "lap")}`;
       else if (/^\d+$/.test(pt) && r.Time && r.Time.time) summary = r.Time.time;
       else if (/^\d+$/.test(pt)) summary = r.status || "";
-      else summary = `${r.status || STATUS_CODES[pt] || ""}${r.laps ? ` (lap ${r.laps})` : ""}`;
+      else {
+        // retired cars sometimes keep a "Finished"/"Lapped" status: say what the position code means
+        const st = !r.status || /^(Finished|Lapped|\+\d+ Laps?)$/.test(r.status) ? { DNF: "Retired", DSQ: "Disqualified", DNS: "Did not start", NC: "Not classified", EX: "Excluded", DNQ: "Did not qualify" }[STATUS_CODES[pt]] || r.status || "" : r.status;
+        summary = `${st}${r.laps && +r.laps > 0 ? ` (lap ${r.laps})` : ""}`;
+      }
       parts.push(summary);
-      if (+r.points > 0) parts.push(`+${fmtPts(+r.points)} pts`);
+      if (+r.points > 0) parts.push(`+${ptsText(+r.points)}`);
       const grid = +r.grid;
       if (r.grid !== undefined) {
         if (grid === 0) parts.push("pit lane start");
@@ -1076,7 +1098,7 @@ function seasonItems(year) {
     const st = standings(year, "driver");
     if (!st.error && st.rows.length) {
       const c = st.rows[0];
-      items.push(info(`${year} Champion: ${withFlag(natFlag(c.Driver.nationality), driverName(c.Driver))}`, `${fmtPts(+c.points)} pts · ${plural(+c.wins, "win")} · ${(c.Constructors || []).map((x) => x.name).join(" → ")}`, "drivers", { autocomplete: `${year} drivers ` }));
+      items.push(info(`${year} Champion: ${withFlag(natFlag(c.Driver.nationality), driverName(c.Driver))}`, `${ptsText(+c.points)} · ${plural(+c.wins, "win")} · ${(c.Constructors || []).map((x) => x.name).join(" → ")}`, "drivers", { autocomplete: `${year} drivers ` }));
     }
   }
   return items.concat(menuItems(year, ""));
@@ -1189,8 +1211,9 @@ function act(arg) {
 function raceCommand(query) {
   const words = String(query || "").replace(/[\u0000-\u001f]/g, " ").trim().split(/\s+/).filter(Boolean);
   let year = null;
-  if (words.length && /^\d{4}$/.test(words[0])) {
-    year = +words.shift();
+  const yi = words.findIndex((w) => /^\d{4}$/.test(w));
+  if (yi >= 0) {
+    year = +words.splice(yi, 1)[0];
     if (year < 1950 || year > THIS_YEAR + 1) return [info(`No Formula 1 season in ${year}`, `Seasons run from 1950 to ${THIS_YEAR + 1}`, "error")];
   }
   const y = year || THIS_YEAR;
