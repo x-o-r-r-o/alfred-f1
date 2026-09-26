@@ -1260,6 +1260,24 @@ function scheduleItems(year, filter) {
   const shown = races.filter((r) => !f || f.split(/\s+/).every((wd) => fold([r.raceName, r.Circuit.circuitName, r.Circuit.Location.locality, r.Circuit.Location.country, `round ${r.round}`].join(" ")).includes(wd)));
   const items = [];
   if (winnersError) items.push(info("Winners unavailable", winnersError.error, winnersError.status === 0 ? "offline" : "error"));
+  // every session still to come, in one calendar file
+  const left = races.filter((r) => !raceOver(r));
+  if (!f && left.length) {
+    const n = left.reduce((sum, r) => sum + sessionsOf(r).filter((s) => sessionState(s) !== "done").length, 0);
+    const title = left.length === races.length ? `Add the ${year} season to Calendar` : `Add the rest of the ${year} season to Calendar`;
+    const sub = `${plural(left.length, "race weekend")} · ${plural(n, "session")} in one calendar file`;
+    items.push({
+      title,
+      subtitle: sub,
+      arg: `ics:${year}:rest`,
+      valid: true,
+      icon: { path: "icons/calendar.png" },
+      mods: {
+        cmd: { arg: `ics:${year}:rest`, valid: true, subtitle: sub },
+        alt: { arg: "", valid: false, subtitle: sub },
+      },
+    });
+  }
   if (!shown.length) items.push(info(`No ${year} race matches “${filter.trim()}”`, "Search by race, circuit, city or country"));
   for (const r of shown) {
     const [page, alt] = racePages(r);
@@ -1378,11 +1396,13 @@ function icsStamp(d) {
   return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
 }
 
-function buildIcs(race, sessions) {
-  const loc = [race.Circuit.circuitName, race.Circuit.Location.locality, race.Circuit.Location.country].filter(Boolean).join(", ");
-  const [page] = racePages(race);
+// weekends: [[race, sessions], …]
+function buildIcs(weekends) {
   const alert = Math.floor(+env("calendar_alert", "15")) || 0;
   const L = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//x-o-r-r-o//Alfred F1//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH"];
+  for (const [race, sessions] of weekends) {
+  const loc = [race.Circuit.circuitName, race.Circuit.Location.locality, race.Circuit.Location.country].filter(Boolean).join(", ");
+  const [page] = racePages(race);
   for (const s of sessions) {
     L.push("BEGIN:VEVENT");
     L.push(`UID:f1-${+race.season}-${+race.round}-${s.key.toLowerCase()}@io.github.x-o-r-r-o.f1`);
@@ -1402,6 +1422,7 @@ function buildIcs(race, sessions) {
     if (page) L.push(`URL:${page}`);
     if (alert > 0 && s.start) L.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${icsEscape(`${s.name} starts in ${alert} minutes`)}`, `TRIGGER:-PT${alert}M`, "END:VALARM");
     L.push("END:VEVENT");
+  }
   }
   L.push("END:VCALENDAR");
   return L.map(icsFold).join("\r\n") + "\r\n";
@@ -1431,20 +1452,30 @@ function act(arg) {
     return "Copied to the clipboard";
   }
   if (kind === "ics") {
-    const p = rest.match(/^(\d{4}):(\d{1,2}):(\w+)$/);
+    // ics:<season>:<round>:<session key | all>, or ics:<season>:rest for every session still to come
+    const p = rest.match(/^(\d{4}):(?:(\d{1,2}):(\w+)|(rest))$/);
     if (!p) return "Invalid calendar request";
     const sch = schedule(+p[1]);
     if (sch.error) return sch.error;
-    const race = sch.races.find((r) => r.round === p[2]);
-    if (!race) return "That race is no longer on the calendar";
-    const all = sessionsOf(race);
-    const sessions = p[3] === "all" ? all : all.filter((s) => s.key === p[3]);
-    if (!sessions.length) return "That session is no longer on the schedule";
+    let weekends, name;
+    if (p[4]) {
+      weekends = sch.races.filter((r) => !raceOver(r)).map((r) => [r, sessionsOf(r).filter((s) => sessionState(s) !== "done")]).filter(([, ss]) => ss.length);
+      if (!weekends.length) return `No races left in ${p[1]}`;
+      name = `f1-${p[1]}-rest`;
+    } else {
+      const race = sch.races.find((r) => r.round === p[2]);
+      if (!race) return "That race is no longer on the calendar";
+      const all = sessionsOf(race);
+      const sessions = p[3] === "all" ? all : all.filter((s) => s.key === p[3]);
+      if (!sessions.length) return "That session is no longer on the schedule";
+      weekends = [[race, sessions]];
+      name = `f1-${p[1]}-${p[2]}-${p[3]}`;
+    }
     const dir = `${cacheDir()}/ics`;
     $.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(dir, true, $(), $());
     pruneCache(false);
-    const file = `${dir}/f1-${p[1]}-${p[2]}-${p[3]}.ics`;
-    if (!writeFile(file, buildIcs(race, sessions))) return "Could not write the calendar file";
+    const file = `${dir}/${name}.ics`;
+    if (!writeFile(file, buildIcs(weekends))) return "Could not write the calendar file";
     if (!TEST_MODE) $.NSWorkspace.sharedWorkspace.openURL($.NSURL.fileURLWithPath(file));
     return "";
   }

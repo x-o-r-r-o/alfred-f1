@@ -416,7 +416,9 @@ class ResultsTests(Base):
 class ScheduleTests(Base):
     def test_markers_and_winners(self):
         it = sf("schedule")
-        self.assertEqual(len(it), 23)
+        self.assertEqual(len(it), 24)
+        self.assertEqual(it[0]["title"], "Add the rest of the 2026 season to Calendar")
+        it = it[1:]
         first = it[0]
         self.assertEqual(first["title"], "1. 🇦🇺 Australian Grand Prix")
         self.assertIn("Winner George Russell (Mercedes)", first["subtitle"])
@@ -666,7 +668,7 @@ class AuditPass2Tests(Base):
         it = sf("schedule", cache=cache)
         self.assertEqual(it[0]["title"], "Winners unavailable")
         self.assertFalse(any("Results pending" in i["subtitle"] for i in it))
-        self.assertEqual(len(it), 24)
+        self.assertEqual(len(it), 25)  # notice, add-to-Calendar row, 23 races
 
     def test_results_before_the_first_race_show_last_season(self):
         it = sf("results", now="2026-02-15T12:00:00Z")
@@ -716,16 +718,16 @@ class AuditPass3Tests(Base):
 
     def test_schedule_never_shows_a_negative_countdown(self):
         # found against the live API: 2 h 30 min after the start the race is still "next"
-        row = sf("schedule", now="2026-09-26T13:30:00Z")[14]
+        row = sf("schedule", now="2026-09-26T13:30:00Z")[15]
         self.assertIn("Race finished", row["subtitle"])
         self.assertNotIn("in under a minute", row["subtitle"])
-        self.assertIn("🔴 Race live now", sf("schedule", now="2026-09-26T11:30:00Z")[14]["subtitle"])
+        self.assertIn("🔴 Race live now", sf("schedule", now="2026-09-26T11:30:00Z")[15]["subtitle"])
 
     def test_malformed_winners_response(self):
         Mock.overrides["2026/results/1"] = {"MRData": {"total": "0"}}
         it = sf("schedule")
-        self.assertEqual(it[0]["title"], "1. 🇦🇺 Australian Grand Prix")
-        self.assertIn("Results pending", it[0]["subtitle"])
+        self.assertEqual(it[1]["title"], "1. 🇦🇺 Australian Grand Prix")
+        self.assertIn("Results pending", it[1]["subtitle"])
 
 
 # ---------- strict RFC 5545 checks (icalendar isn't installed, so by hand) ----------
@@ -1101,6 +1103,32 @@ class Round4Tests(Base):
         self.assertEqual(run_alfred(["act", "open:https://www.formula1.com/"], cache=cache), "")
         self.assertEqual(run_alfred(["act", "ics:2026:16:all"], cache=cache), "")
         self.assertEqual(run_alfred(["act", "copy:x"], cache=cache), "Copied to the clipboard\n")
+
+    def test_add_the_rest_of_the_season_to_calendar(self):
+        cache = new_cache()
+        head = sf("schedule", cache=cache)[0]
+        self.assertEqual(head["title"], "Add the rest of the 2026 season to Calendar")
+        # Baku (round 15) is over; rounds 16-23 have 8 × 5 sessions plus Singapore's sprint weekend (5)
+        self.assertEqual(head["subtitle"], "8 race weekends · 40 sessions in one calendar file")
+        self.assertEqual(head["arg"], "ics:2026:rest")
+        self.assertEqual(head["mods"]["cmd"]["arg"], "ics:2026:rest")
+        self.assertEqual(act("ics:2026:rest", cache), "")
+        with open(os.path.join(cache, "ics", "f1-2026-rest.ics"), newline="") as fh:
+            ics = fh.read()
+        check_ics(self, ics)
+        self.assertEqual(ics.count("BEGIN:VEVENT"), 40)
+        self.assertTrue("UID:f1-2026-16-firstpractice@" in ics and "UID:f1-2026-23-race@" in ics)
+        self.assertFalse("UID:f1-2026-15-" in ics)
+        # a weekend in progress keeps only its sessions still to come
+        act("ics:2026:rest", cache, now="2026-10-03T12:00:00Z")
+        with open(os.path.join(cache, "ics", "f1-2026-rest.ics"), newline="") as fh:
+            ics = fh.read()
+        self.assertTrue("UID:f1-2026-16-firstpractice@" not in ics and "UID:f1-2026-16-race@" in ics)
+        # a filter, a finished season or a past one: no row
+        self.assertFalse(sf("schedule monaco", cache=cache)[0]["title"].startswith("Add "))
+        self.assertFalse(sf("2025 schedule", cache=cache)[0]["title"].startswith("Add "))
+        self.assertEqual(sf("schedule", cache=cache, now="2026-02-01T12:00:00Z")[0]["title"], "Add the 2026 season to Calendar")
+        self.assertEqual(act("ics:2025:rest", cache), "No races left in 2025")
 
     def test_keyword_with_spaces_or_empty(self):
         cache = new_cache()
