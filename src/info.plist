@@ -5,48 +5,281 @@
 	<key>bundleid</key>
 	<string>io.github.x-o-r-r-o.f1</string>
 	<key>category</key>
-	<string>Productivity</string>
+	<string>Internet</string>
 	<key>connections</key>
-	<dict/>
+	<dict>
+		<key>2B7D3F2E-86A5-5314-A015-6D6FE77F7B54</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>E12D3427-63D4-51C8-83EA-151AC4D043FB</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+			<dict>
+				<key>destinationuid</key>
+				<string>E12D3427-63D4-51C8-83EA-151AC4D043FB</string>
+				<key>modifiers</key>
+				<integer>1048576</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+			<dict>
+				<key>destinationuid</key>
+				<string>E12D3427-63D4-51C8-83EA-151AC4D043FB</string>
+				<key>modifiers</key>
+				<integer>524288</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+		</array>
+		<key>5396D022-BD7F-5878-BCAE-63D049DE4230</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>2B7D3F2E-86A5-5314-A015-6D6FE77F7B54</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+		</array>
+		<key>E12D3427-63D4-51C8-83EA-151AC4D043FB</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>0D6F150C-73CC-58BC-9061-7664638FBCED</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+		</array>
+	</dict>
 	<key>createdby</key>
 	<string>x-o-r-r-o</string>
 	<key>description</key>
-	<string>F1 standings, next race countdown and results.</string>
+	<string>Next race weekend in local time, standings, results and the season schedule</string>
+	<key>disabled</key>
+	<false/>
 	<key>name</key>
 	<string>Formula 1</string>
 	<key>objects</key>
-	<array/>
+	<array>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>alfredfiltersresults</key>
+				<false/>
+				<key>alfredfiltersresultsmatchmode</key>
+				<integer>0</integer>
+				<key>argumenttreatemptyqueryasnil</key>
+				<false/>
+				<key>argumenttrimmode</key>
+				<integer>0</integer>
+				<key>argumenttype</key>
+				<integer>1</integer>
+				<key>escaping</key>
+				<integer>102</integer>
+				<key>keyword</key>
+				<string>{var:keyword_race}</string>
+				<key>queuedelaycustom</key>
+				<integer>3</integer>
+				<key>queuedelayimmediatelyinitially</key>
+				<true/>
+				<key>queuedelaymode</key>
+				<integer>0</integer>
+				<key>queuemode</key>
+				<integer>1</integer>
+				<key>runningsubtext</key>
+				<string>Loading Formula 1 data…</string>
+				<key>script</key>
+				<string>osascript -l JavaScript ./f1.js race "$1"</string>
+				<key>scriptargtype</key>
+				<integer>1</integer>
+				<key>scriptfile</key>
+				<string></string>
+				<key>skipuniversalaction</key>
+				<true/>
+				<key>subtext</key>
+				<string>Next race weekend, standings, results and schedule</string>
+				<key>title</key>
+				<string>Formula 1</string>
+				<key>type</key>
+				<integer>0</integer>
+				<key>withspace</key>
+				<true/>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.input.scriptfilter</string>
+			<key>uid</key>
+			<string>2B7D3F2E-86A5-5314-A015-6D6FE77F7B54</string>
+			<key>version</key>
+			<integer>3</integer>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>action</key>
+				<integer>0</integer>
+				<key>argument</key>
+				<integer>0</integer>
+				<key>focusedappvariable</key>
+				<false/>
+				<key>focusedappvariablename</key>
+				<string></string>
+				<key>hotkey</key>
+				<integer>0</integer>
+				<key>hotmod</key>
+				<integer>0</integer>
+				<key>leftcursor</key>
+				<false/>
+				<key>modsmode</key>
+				<integer>0</integer>
+				<key>relatedAppsMode</key>
+				<integer>0</integer>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.trigger.hotkey</string>
+			<key>uid</key>
+			<string>5396D022-BD7F-5878-BCAE-63D049DE4230</string>
+			<key>version</key>
+			<integer>2</integer>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>concurrently</key>
+				<false/>
+				<key>escaping</key>
+				<integer>102</integer>
+				<key>script</key>
+				<string>osascript -l JavaScript ./f1.js act "$1"</string>
+				<key>scriptargtype</key>
+				<integer>1</integer>
+				<key>scriptfile</key>
+				<string></string>
+				<key>type</key>
+				<integer>0</integer>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.action.script</string>
+			<key>uid</key>
+			<string>E12D3427-63D4-51C8-83EA-151AC4D043FB</string>
+			<key>version</key>
+			<integer>2</integer>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>lastpathcomponent</key>
+				<false/>
+				<key>onlyshowifquerypopulated</key>
+				<true/>
+				<key>removeextension</key>
+				<false/>
+				<key>text</key>
+				<string>{query}</string>
+				<key>title</key>
+				<string>{var:alfred_workflow_name}</string>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.output.notification</string>
+			<key>uid</key>
+			<string>0D6F150C-73CC-58BC-9061-7664638FBCED</string>
+			<key>version</key>
+			<integer>1</integer>
+		</dict>
+	</array>
 	<key>readme</key>
-	<string># Formula 1
+	<string>## Usage
 
-F1 standings, next race countdown and results.
+See the next race weekend via the `race` keyword: every session (practice, sprint qualifying, sprint, qualifying and the race) in local time with a countdown. Sessions that are live or finished are marked, and times not yet confirmed show as TBC.
 
-&gt; **Status:** planned — not yet functional. See [PLAN.md](PLAN.md).
+* &lt;kbd&gt;↩&lt;/kbd&gt; Open the race page on formula1.com (or Wikipedia, set in the Workflow’s Configuration).
+* &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;↩&lt;/kbd&gt; Add the session to Calendar. On the race name, add the whole weekend.
+* &lt;kbd&gt;⌥&lt;/kbd&gt;&lt;kbd&gt;↩&lt;/kbd&gt; Open the other race page.
+* &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;Y&lt;/kbd&gt; Quick Look the race page.
+* &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;C&lt;/kbd&gt; Copy the session and its time.
 
-## Usage
+Configure the Hotkey to see the next race weekend at a glance.
 
-F1 standings, next race countdown and results via the `race` keyword.
+### Standings
 
-![Formula 1 results in Alfred](images/race.png)
+See the drivers’ championship via `race drivers` and the constructors’ championship via `race teams`, with points, wins, the gap to the leader, nationality flags and team colours. Drivers who changed teams during the season show both. Type a name, team or nationality after the command to filter, like `race drivers ferrari`.
 
-* &lt;kbd&gt;↩&lt;/kbd&gt; Primary action.
-* &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;↩&lt;/kbd&gt; Secondary action.
-* &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;Y&lt;/kbd&gt; Quick Look.
+* &lt;kbd&gt;↩&lt;/kbd&gt; Open the driver’s or team’s Wikipedia page.
+* &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;↩&lt;/kbd&gt; Copy the standings table.
 
-Every keyword can be changed in the Workflow’s Configuration.
+### Results
 
-## Development
+See the last race’s classification via `race results`, with the winner, fastest lap, points and places gained from the grid. Use `race quali` for qualifying with Q1, Q2 and Q3 times, and `race sprint` for the last sprint. Add a round number or a race name to pick another weekend, like `race results 12` or `race quali monaco`. Press &lt;kbd&gt;⇥&lt;/kbd&gt; on the rows at the bottom to switch session or round.
 
-```bash
-./build.sh   # -&gt; dist/alfred-f1-&lt;version&gt;.alfredworkflow
-```
+* &lt;kbd&gt;↩&lt;/kbd&gt; Open the driver’s Wikipedia page.
+* &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;↩&lt;/kbd&gt; Copy the classification.
 
-## AI disclosure
+### Schedule
 
-This workflow is developed with the help of Claude (Anthropic), an AI assistant. All code is reviewed and tested by the author.
+See every round of the season via `race schedule`, with the winners of past races and the countdown to the next one. Type a race, city or country to filter. Press &lt;kbd&gt;⇥&lt;/kbd&gt; on a past race to see its results.
+
+* &lt;kbd&gt;↩&lt;/kbd&gt; Open the race page.
+* &lt;kbd&gt;⌘&lt;/kbd&gt;&lt;kbd&gt;↩&lt;/kbd&gt; Add every session of the weekend to Calendar.
+
+### Past Seasons
+
+Start with a year to look back, like `race 2021`, `race 2021 drivers` or `race 2008 results 18`. Seasons go back to 1950.
+
+Standings refresh every hour, the schedule every day, and results every 10 minutes during a race weekend. Without a connection, the last data is shown with a notice.
+
+The keyword, race page, time format and Calendar alert can be changed in the Workflow’s Configuration.
 </string>
 	<key>uidata</key>
-	<dict/>
+	<dict>
+		<key>0D6F150C-73CC-58BC-9061-7664638FBCED</key>
+		<dict>
+			<key>xpos</key>
+			<integer>690</integer>
+			<key>ypos</key>
+			<integer>20</integer>
+		</dict>
+		<key>2B7D3F2E-86A5-5314-A015-6D6FE77F7B54</key>
+		<dict>
+			<key>xpos</key>
+			<integer>250</integer>
+			<key>ypos</key>
+			<integer>20</integer>
+		</dict>
+		<key>5396D022-BD7F-5878-BCAE-63D049DE4230</key>
+		<dict>
+			<key>note</key>
+			<string>Set a Hotkey to show the next race weekend</string>
+			<key>xpos</key>
+			<integer>30</integer>
+			<key>ypos</key>
+			<integer>20</integer>
+		</dict>
+		<key>E12D3427-63D4-51C8-83EA-151AC4D043FB</key>
+		<dict>
+			<key>note</key>
+			<string>Opens pages, copies tables, and writes .ics files for Calendar</string>
+			<key>xpos</key>
+			<integer>470</integer>
+			<key>ypos</key>
+			<integer>20</integer>
+		</dict>
+	</dict>
 	<key>userconfigurationconfig</key>
 	<array>
 		<dict>
@@ -62,17 +295,115 @@ This workflow is developed with the help of Claude (Anthropic), an AI assistant.
 				<true/>
 			</dict>
 			<key>description</key>
-			<string></string>
+			<string>Next race weekend, standings, results and schedule</string>
 			<key>label</key>
-			<string>Race keyword</string>
+			<string>Keyword</string>
 			<key>type</key>
 			<string>textfield</string>
 			<key>variable</key>
 			<string>keyword_race</string>
 		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>default</key>
+				<string>f1</string>
+				<key>pairs</key>
+				<array>
+					<array>
+						<string>formula1.com</string>
+						<string>f1</string>
+					</array>
+					<array>
+						<string>Wikipedia</string>
+						<string>wikipedia</string>
+					</array>
+				</array>
+			</dict>
+			<key>description</key>
+			<string>⌥↩ opens the other one</string>
+			<key>label</key>
+			<string>Race page (↩)</string>
+			<key>type</key>
+			<string>popupbutton</string>
+			<key>variable</key>
+			<string>race_page</string>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>default</key>
+				<string>system</string>
+				<key>pairs</key>
+				<array>
+					<array>
+						<string>Same as macOS</string>
+						<string>system</string>
+					</array>
+					<array>
+						<string>24-hour</string>
+						<string>24</string>
+					</array>
+					<array>
+						<string>12-hour</string>
+						<string>12</string>
+					</array>
+				</array>
+			</dict>
+			<key>description</key>
+			<string></string>
+			<key>label</key>
+			<string>Time format</string>
+			<key>type</key>
+			<string>popupbutton</string>
+			<key>variable</key>
+			<string>time_format</string>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>default</key>
+				<string>15</string>
+				<key>pairs</key>
+				<array>
+					<array>
+						<string>None</string>
+						<string>0</string>
+					</array>
+					<array>
+						<string>5 minutes before</string>
+						<string>5</string>
+					</array>
+					<array>
+						<string>15 minutes before</string>
+						<string>15</string>
+					</array>
+					<array>
+						<string>30 minutes before</string>
+						<string>30</string>
+					</array>
+					<array>
+						<string>1 hour before</string>
+						<string>60</string>
+					</array>
+				</array>
+			</dict>
+			<key>description</key>
+			<string>Reminder added to sessions saved to Calendar</string>
+			<key>label</key>
+			<string>Calendar alert (⌘↩)</string>
+			<key>type</key>
+			<string>popupbutton</string>
+			<key>variable</key>
+			<string>calendar_alert</string>
+		</dict>
 	</array>
+	<key>variables</key>
+	<dict/>
+	<key>variablesdontexport</key>
+	<array/>
 	<key>version</key>
-	<string>0.1.0</string>
+	<string>1.0.0</string>
 	<key>webaddress</key>
 	<string>https://github.com/x-o-r-r-o/alfred-f1</string>
 </dict>

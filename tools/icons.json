@@ -1,0 +1,18 @@
+{
+  "icon": ["flag.checkered", "#E10600"],
+  "race": ["flag.checkered", "#E10600"],
+  "practice": ["stopwatch.fill", "#475569"],
+  "quali": ["timer", "#7C3AED"],
+  "sprint": ["hare.fill", "#EA580C"],
+  "live": ["dot.radiowaves.left.and.right", "#DC2626"],
+  "done": ["checkmark.circle.fill", "#6B7280"],
+  "next": ["flag.fill", "#16A34A"],
+  "calendar": ["calendar", "#2563EB"],
+  "drivers": ["trophy.fill", "#CA8A04"],
+  "teams": ["person.2.fill", "#0891B2"],
+  "results": ["list.number", "#DB2777"],
+  "season": ["clock.arrow.circlepath", "#4F46E5"],
+  "info": ["info.circle.fill", "#64748B"],
+  "offline": ["wifi.slash", "#D97706"],
+  "error": ["exclamationmark.triangle.fill", "#DC2626"]
+}

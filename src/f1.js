@@ -1,0 +1,1230 @@
+#!/usr/bin/osascript -l JavaScript
+// Formula 1 for Alfred: next race weekend, standings, results and schedule.
+// Data: the Jolpica F1 API (the Ergast successor). No dependencies beyond macOS.
+// Usage: osascript -l JavaScript f1.js race [query]      (Script Filter)
+//        osascript -l JavaScript f1.js act <arg>         (action: open:<url> | ics:<season>:<round>:<key|all> | copy:<text>)
+//        osascript -l JavaScript f1.js refresh <path>    (background cache refresh)
+ObjC.import("Foundation");
+ObjC.import("AppKit");
+
+const ENV = $.NSProcessInfo.processInfo.environment;
+function env(name, fallback) {
+  const v = ENV.objectForKey(name);
+  return v.isNil() ? fallback : v.js;
+}
+
+const API_BASE = env("F1_API_BASE", "https://api.jolpi.ca/ergast/f1").replace(/\/+$/, "");
+const UA = "alfred-f1/1.0 (+https://github.com/x-o-r-r-o/alfred-f1)";
+const PAGE = 100; // Jolpica's maximum page size
+const MIN = 60, HOUR = 3600, DAY = 86400;
+const RETRY_AFTER = 60; // seconds before a failed background refresh is retried
+let RERUN = null; // set when a background refresh is running
+const NOTICES = [];
+
+// ---------- clock ----------
+
+// F1_NOW (an ISO date) makes the clock injectable for tests.
+function now() {
+  const fake = env("F1_NOW", "");
+  if (fake) {
+    const d = new Date(fake);
+    if (!isNaN(d)) return d;
+  }
+  return new Date();
+}
+const NOW = now();
+const THIS_YEAR = NOW.getFullYear();
+
+// ---------- helpers ----------
+
+function cacheDir() {
+  const dir = env("alfred_workflow_cache", `${$.NSTemporaryDirectory().js}alfred-f1`);
+  $.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(`${dir}/api`, true, $(), $());
+  return dir;
+}
+
+function readFile(path) {
+  const s = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, $());
+  return s.isNil() ? null : s.js;
+}
+
+function writeFile(path, text) {
+  return $(text).writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, $());
+}
+
+function exists(path) {
+  return $.NSFileManager.defaultManager.fileExistsAtPath(path);
+}
+
+function removeFile(path) {
+  $.NSFileManager.defaultManager.removeItemAtPathError(path, $());
+}
+
+// Seconds since the file was modified (real clock, not F1_NOW), or null.
+function fileAge(path) {
+  const attrs = $.NSFileManager.defaultManager.attributesOfItemAtPathError(path, $());
+  if (attrs.isNil()) return null;
+  const m = attrs.objectForKey("NSFileModificationDate");
+  return m.isNil() ? null : Date.now() / 1000 - m.timeIntervalSince1970;
+}
+
+function fold(s) {
+  return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function info(title, subtitle, icon = "info", extra = {}) {
+  return Object.assign({ title, subtitle: subtitle || "", valid: false, icon: { path: `icons/${icon}.png` } }, extra);
+}
+
+function output(items) {
+  const all = NOTICES.concat(items);
+  const out = { skipknowledge: true, items: all };
+  if (RERUN) out.rerun = RERUN;
+  return JSON.stringify(out);
+}
+
+function kw() {
+  return env("keyword_race", "race");
+}
+
+// ---------- flags ----------
+
+const NATIONALITY = {
+  american: "US", "american-italian": "US", argentine: "AR", argentinian: "AR", "argentine-italian": "AR", australian: "AU",
+  austrian: "AT", belgian: "BE", brazilian: "BR", british: "GB", canadian: "CA", chilean: "CL", chinese: "CN",
+  colombian: "CO", czech: "CZ", danish: "DK", dutch: "NL", "east german": "DE", emirati: "AE", estonian: "EE",
+  finnish: "FI", french: "FR", german: "DE", "hong kong": "HK", hungarian: "HU", indian: "IN", indonesian: "ID",
+  irish: "IE", israeli: "IL", italian: "IT", japanese: "JP", liechtensteiner: "LI", malaysian: "MY", mexican: "MX",
+  monegasque: "MC", moroccan: "MA", "new zealander": "NZ", polish: "PL", portuguese: "PT", rhodesian: "ZW",
+  russian: "RU", "south african": "ZA", spanish: "ES", swedish: "SE", swiss: "CH", thai: "TH", uruguayan: "UY",
+  venezuelan: "VE", korean: "KR", "south korean": "KR", saudi: "SA", qatari: "QA", singaporean: "SG",
+};
+const COUNTRY = {
+  argentina: "AR", australia: "AU", austria: "AT", azerbaijan: "AZ", bahrain: "BH", belgium: "BE", brazil: "BR",
+  canada: "CA", china: "CN", france: "FR", germany: "DE", hungary: "HU", india: "IN", italy: "IT", japan: "JP",
+  korea: "KR", "south korea": "KR", malaysia: "MY", mexico: "MX", monaco: "MC", morocco: "MA", netherlands: "NL",
+  portugal: "PT", qatar: "QA", russia: "RU", "saudi arabia": "SA", singapore: "SG", "south africa": "ZA",
+  spain: "ES", sweden: "SE", switzerland: "CH", turkey: "TR", uae: "AE", "united arab emirates": "AE",
+  uk: "GB", "united kingdom": "GB", "great britain": "GB", usa: "US", "united states": "US", vietnam: "VN",
+  thailand: "TH", rwanda: "RW",
+};
+
+function flagOf(code) {
+  if (!code || !/^[A-Z]{2}$/.test(code)) return "";
+  return String.fromCodePoint(0x1f1e6 + code.charCodeAt(0) - 65, 0x1f1e6 + code.charCodeAt(1) - 65);
+}
+function natFlag(n) {
+  return flagOf(NATIONALITY[fold(n)]);
+}
+function countryFlag(c) {
+  return flagOf(COUNTRY[fold(c)]);
+}
+function withFlag(flag, text) {
+  return flag ? `${flag} ${text}` : text;
+}
+
+function teamIcon(id) {
+  const p = `icons/team-${id}.png`;
+  return { path: exists(p) ? p : "icons/team-unknown.png" };
+}
+
+// ---------- time ----------
+
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function use12h() {
+  const f = env("time_format", "system");
+  if (f === "12") return true;
+  if (f === "24") return false;
+  try {
+    const t = $.NSDateFormatter.dateFormatFromTemplateOptionsLocale("j", 0, $.NSLocale.currentLocale);
+    return !t.isNil() && t.js.includes("a");
+  } catch (e) {
+    return false;
+  }
+}
+const H12 = use12h();
+
+function pad(n) {
+  return String(n).padStart(2, "0");
+}
+function fmtDay(d, withYear) {
+  return `${DOW[d.getDay()]} ${d.getDate()} ${MON[d.getMonth()]}${withYear ? " " + d.getFullYear() : ""}`;
+}
+function fmtTime(d) {
+  if (!H12) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const h = d.getHours() % 12 || 12;
+  return `${h}:${pad(d.getMinutes())} ${d.getHours() < 12 ? "AM" : "PM"}`;
+}
+// A date-only session: "2026-10-02" is shown as that calendar day, no time-zone conversion.
+function dateOnly(s) {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d, 12);
+}
+function localDateStr(d) {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function daysBetween(a, b) {
+  const [y1, m1, d1] = a.split("-").map(Number), [y2, m2, d2] = b.split("-").map(Number);
+  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+}
+
+function duration(ms) {
+  const m = Math.floor(ms / 60000);
+  const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mi = m % 60;
+  if (d > 0) return `${plural(d, "day")}${h ? ` ${h} h` : ""}`;
+  if (h > 0) return `${h} h${mi ? ` ${mi} min` : ""}`;
+  return `${mi} min`;
+}
+function until(ms) {
+  return ms < 60000 ? "in under a minute" : `in ${duration(ms)}`;
+}
+function ago(ms) {
+  return ms < 60000 ? "just now" : `${duration(ms)} ago`;
+}
+function dayCountdown(dateStr) {
+  const n = daysBetween(localDateStr(NOW), dateStr);
+  if (n === 0) return "today";
+  if (n === 1) return "tomorrow";
+  if (n > 1) return `in ${n} days`;
+  return n === -1 ? "yesterday" : `${-n} days ago`;
+}
+
+// ---------- sessions ----------
+
+// [API key, name, short name, icon, duration in minutes]
+const SESSION_DEFS = [
+  ["FirstPractice", "Practice 1", "FP1", "practice", 60],
+  ["SecondPractice", "Practice 2", "FP2", "practice", 60],
+  ["ThirdPractice", "Practice 3", "FP3", "practice", 60],
+  ["SprintShootout", "Sprint Shootout", "SS", "quali", 45],
+  ["SprintQualifying", "Sprint Qualifying", "SQ", "quali", 45],
+  ["Sprint", "Sprint", "Sprint", "sprint", 60],
+  ["Qualifying", "Qualifying", "Quali", "quali", 60],
+  ["Race", "Race", "Race", "race", 120],
+];
+const RACE_OVER_MS = 3 * 3600 * 1000; // a race is "over" three hours after the start (red flags)
+
+function parseStart(date, time) {
+  if (!date || !time) return null;
+  let t = String(time).trim();
+  if (!/(Z|[+-]\d\d:?\d\d)$/.test(t)) t += "Z";
+  const d = new Date(`${date}T${t}`);
+  return isNaN(d) ? null : d;
+}
+
+function sessionsOf(race) {
+  const out = [];
+  SESSION_DEFS.forEach(([key, name, short, icon, dur], i) => {
+    const s = key === "Race" ? { date: race.date, time: race.time } : race[key];
+    if (!s || !s.date) return;
+    const start = parseStart(s.date, s.time);
+    out.push({ key, name, short, icon, dur, date: s.date, start, order: i });
+  });
+  const sortVal = (s) => (s.start ? s.start.getTime() : Date.UTC(...s.date.split("-").map((v, j) => (j === 1 ? v - 1 : +v))) + 12 * 3600000);
+  out.sort((a, b) => sortVal(a) - sortVal(b) || a.order - b.order);
+  return out;
+}
+
+function sessionState(s) {
+  if (s.start) {
+    const t = NOW.getTime(), st = s.start.getTime();
+    if (t < st) return "upcoming";
+    if (t < st + s.dur * 60000) return "live";
+    return "done";
+  }
+  const n = daysBetween(localDateStr(NOW), s.date);
+  return n > 0 ? "upcoming" : n === 0 ? "today" : "done";
+}
+
+function hasStarted(s) {
+  const st = sessionState(s);
+  return st === "live" || st === "done" || st === "today";
+}
+
+function raceStart(race) {
+  return parseStart(race.date, race.time);
+}
+function raceOver(race) {
+  const st = raceStart(race);
+  if (st) return NOW.getTime() > st.getTime() + RACE_OVER_MS;
+  return daysBetween(localDateStr(NOW), race.date) < 0;
+}
+function isSprintWeekend(race) {
+  return !!(race.Sprint);
+}
+function whenText(s, withYear) {
+  if (s.start) return `${fmtDay(s.start, withYear)} ${fmtTime(s.start)}`;
+  return `${fmtDay(dateOnly(s.date), withYear)} · time TBC`;
+}
+
+// ---------- links ----------
+
+const F1_SLUGS = {
+  albert_park: "australia", shanghai: "china", suzuka: "japan", bahrain: "bahrain", jeddah: "saudi-arabia",
+  miami: "miami", imola: "emiliaromagna", monaco: "monaco", catalunya: "spain", villeneuve: "canada",
+  red_bull_ring: "austria", silverstone: "great-britain", spa: "belgium", hungaroring: "hungary",
+  zandvoort: "netherlands", monza: "italy", baku: "azerbaijan", marina_bay: "singapore", americas: "united-states",
+  rodriguez: "mexico", interlagos: "brazil", vegas: "las-vegas", losail: "qatar", yas_marina: "united-arab-emirates",
+  madring: "spain", ricard: "france", portimao: "portugal", istanbul: "turkey", sochi: "russia", mugello: "tuscany",
+  nurburgring: "eifel", sepang: "malaysia", hockenheimring: "germany",
+};
+
+function f1Url(race) {
+  let slug = F1_SLUGS[race.Circuit && race.Circuit.circuitId];
+  if (race.Circuit && race.Circuit.circuitId === "catalunya" && /barcelona/i.test(race.raceName)) slug = "barcelona-catalunya";
+  if (!slug || +race.season < 2018) return null;
+  return `https://www.formula1.com/en/racing/${race.season}/${slug}`;
+}
+function wikiUrl(race) {
+  return /^https?:\/\//.test(race.url || "") ? race.url.replace(/^http:/, "https:") : null;
+}
+// [primary, alternative] race pages, following the Workflow Configuration
+function racePages(race) {
+  const f1 = f1Url(race), wiki = wikiUrl(race);
+  const pref = env("race_page", "f1") === "wikipedia" ? [wiki, f1] : [f1, wiki];
+  const list = pref.filter(Boolean);
+  return [list[0] || null, list[1] || list[0] || null];
+}
+function pageName(url) {
+  return /formula1\.com/.test(url || "") ? "formula1.com" : "Wikipedia";
+}
+
+// ---------- HTTP + cache ----------
+
+// Run a command, return { status, out }.
+function run_(path, args) {
+  const task = $.NSTask.alloc.init;
+  task.executableURL = $.NSURL.fileURLWithPath(path);
+  task.arguments = args;
+  const outP = $.NSPipe.pipe;
+  task.standardOutput = outP;
+  task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+  task.standardInput = $.NSFileHandle.fileHandleWithNullDevice;
+  if (!task.launchAndReturnError($())) return { status: -1, out: "" };
+  const data = outP.fileHandleForReading.readDataToEndOfFile;
+  task.waitUntilExit;
+  const s = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+  return { status: task.terminationStatus, out: s.isNil() ? "" : s.js };
+}
+
+const CURL_ERRORS = { 6: "No internet connection (could not resolve the host)", 7: "Could not connect to the F1 API", 28: "The F1 API timed out", 35: "Secure connection failed", 52: "The F1 API returned nothing", 56: "The connection was interrupted" };
+
+// One GET. Returns { data } (MRData) or { error, status }.
+function httpGet(url) {
+  const r = run_("/usr/bin/curl", ["-sS", "-L", "--compressed", "--connect-timeout", "4", "--max-time", "12", "-A", UA, "-H", "Accept: application/json", "-w", "\n%{http_code}", url]);
+  if (r.status !== 0) return { error: CURL_ERRORS[r.status] || `Network error (curl ${r.status})`, status: 0 };
+  const cut = r.out.lastIndexOf("\n");
+  const code = +r.out.slice(cut + 1), body = r.out.slice(0, cut);
+  if (code === 429) return { error: "The F1 API is rate limiting requests (HTTP 429): try again in a minute", status: 429 };
+  if (code !== 200) return { error: `The F1 API returned HTTP ${code}`, status: code };
+  try {
+    const j = JSON.parse(body);
+    if (!j || !j.MRData) throw new Error("no MRData");
+    return { data: j.MRData };
+  } catch (e) {
+    return { error: "Unexpected response from the F1 API", status: code };
+  }
+}
+
+// Merge a following page into the first (races split across pages keep one entry).
+function mergePage(a, b) {
+  if (a.RaceTable && b.RaceTable) {
+    const ra = a.RaceTable.Races, rb = b.RaceTable.Races || [];
+    for (const r of rb) {
+      const last = ra[ra.length - 1];
+      if (last && last.season === r.season && last.round === r.round) {
+        for (const k of Object.keys(r)) if (Array.isArray(r[k])) last[k] = (last[k] || []).concat(r[k]);
+      } else ra.push(r);
+    }
+  }
+  if (a.StandingsTable && b.StandingsTable) {
+    const la = a.StandingsTable.StandingsLists, lb = b.StandingsTable.StandingsLists || [];
+    for (const l of lb) {
+      const last = la[la.length - 1];
+      if (last && last.season === l.season) {
+        for (const k of Object.keys(l)) if (Array.isArray(l[k])) last[k] = (last[k] || []).concat(l[k]);
+      } else la.push(l);
+    }
+  }
+}
+
+// Fetch every page of an endpoint (politely: at most 5 pages, 300 ms apart).
+function fetchAll(path) {
+  const first = httpGet(`${API_BASE}/${path}/?limit=${PAGE}`);
+  if (first.error) return first;
+  const total = +first.data.total || 0;
+  const step = +first.data.limit || PAGE; // the API may cap the page size below what was asked
+  for (let off = step, n = 1; off < total && n < 10; off += step, n++) {
+    $.NSThread.sleepForTimeInterval(0.3);
+    const p = httpGet(`${API_BASE}/${path}/?limit=${step}&offset=${off}`);
+    if (p.error) return p;
+    mergePage(first.data, p.data);
+  }
+  return first;
+}
+
+function cacheFile(path) {
+  return `${cacheDir()}/api/${path.replace(/[^A-Za-z0-9]+/g, "_")}.json`;
+}
+
+function refreshNow(path) {
+  const file = cacheFile(path);
+  const r = fetchAll(path);
+  if (r.data) {
+    writeFile(file, JSON.stringify(r.data));
+    removeFile(`${file}.attempt`);
+  }
+  return r;
+}
+
+// Refresh a stale cache entry in a separate process, so Alfred shows the cached data at once.
+function refreshInBackground(path) {
+  const file = cacheFile(path);
+  writeFile(`${file}.lock`, String(Date.now()));
+  writeFile(`${file}.attempt`, JSON.stringify({ status: 0, error: "The update was interrupted" }));
+  const script = `${$.NSFileManager.defaultManager.currentDirectoryPath.js}/f1.js`;
+  const task = $.NSTask.alloc.init;
+  task.executableURL = $.NSURL.fileURLWithPath("/usr/bin/osascript");
+  task.arguments = ["-l", "JavaScript", script, "refresh", path];
+  task.standardOutput = $.NSFileHandle.fileHandleWithNullDevice;
+  task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+  task.standardInput = $.NSFileHandle.fileHandleWithNullDevice;
+  if (!task.launchAndReturnError($())) removeFile(`${file}.lock`);
+}
+
+// Background entry point: fetch, then record the outcome for the next Script Filter run.
+function backgroundRefresh(path) {
+  const file = cacheFile(path);
+  const r = refreshNow(path);
+  if (r.error) writeFile(`${file}.attempt`, JSON.stringify({ status: r.status, error: r.error }));
+  else removeFile(`${file}.attempt`);
+  removeFile(`${file}.lock`);
+  return "";
+}
+
+function staleNotice(age, error) {
+  const n = info(`Offline: showing data from ${ago(age * 1000)}`, `${error || "Could not update"} · Updates when the F1 API is reachable`, "offline");
+  if (!NOTICES.some((x) => x.title.startsWith("Offline"))) NOTICES.push(n);
+}
+
+// Cached GET: fresh cache → cached data; stale → cached data + background refresh; none → fetch now.
+// Returns { data } or { error }.
+function api(path, ttl) {
+  const file = cacheFile(path);
+  const age = fileAge(file);
+  const cached = age === null ? null : readFile(file);
+  let data = null;
+  if (cached) {
+    try {
+      data = JSON.parse(cached);
+    } catch (e) {
+      data = null;
+    }
+  }
+  if (data && age < ttl) return { data };
+  if (data) {
+    const lockAge = fileAge(`${file}.lock`);
+    const attemptAge = fileAge(`${file}.attempt`);
+    if (lockAge !== null && lockAge < 30) {
+      RERUN = 0.5;
+      return { data, refreshing: true };
+    }
+    if (attemptAge !== null && attemptAge < RETRY_AFTER) {
+      // the last refresh finished without updating the cache: it failed
+      staleNotice(age, lastAttempt(file).error);
+      return { data, stale: true };
+    }
+    if (env("F1_SYNC", "") === "1") {
+      const r = refreshNow(path);
+      if (r.data) return { data: r.data };
+      staleNotice(age, r.error);
+      return { data, stale: true };
+    }
+    refreshInBackground(path);
+    RERUN = 0.5;
+    return { data, refreshing: true };
+  }
+  // nothing cached: fetch now, but don't retry a failure on every keystroke
+  const attemptAge = fileAge(`${file}.attempt`);
+  if (attemptAge !== null && attemptAge < 10) {
+    const a = lastAttempt(file);
+    if (a.error) return a;
+  }
+  const r = refreshNow(path);
+  if (r.error) writeFile(`${file}.attempt`, JSON.stringify({ status: r.status, error: r.error }));
+  return r;
+}
+
+function lastAttempt(file) {
+  try {
+    const a = JSON.parse(readFile(`${file}.attempt`) || "{}");
+    return { status: a.status || 0, error: a.error || "" };
+  } catch (e) {
+    return { status: 0, error: "" };
+  }
+}
+
+// ---------- data access ----------
+
+function errorItems(r, what) {
+  const offline = r.status === 0;
+  return [
+    info(offline ? "Can’t reach the Formula 1 API" : `Couldn’t load ${what}`, r.error, offline ? "offline" : "error"),
+  ];
+}
+
+function pastSeason(year) {
+  return year < THIS_YEAR;
+}
+
+function schedule(year) {
+  const r = api(`${year}/races`, pastSeason(year) ? 30 * DAY : DAY);
+  if (r.error) return r;
+  return { races: (r.data.RaceTable && r.data.RaceTable.Races) || [] };
+}
+
+// Results change often around a race: refresh every 10 minutes from the first session
+// of a weekend until a day after its race; otherwise every 6 hours.
+function hot(races) {
+  const t = NOW.getTime();
+  return races.some((race) => {
+    const ss = sessionsOf(race);
+    const first = ss.find((s) => s.start) || null;
+    const st = raceStart(race);
+    const from = first ? first.start.getTime() : Date.UTC(...race.date.split("-").map((v, j) => (j === 1 ? v - 1 : +v))) - 3 * DAY * 1000;
+    const to = (st ? st.getTime() : Date.UTC(...race.date.split("-").map((v, j) => (j === 1 ? v - 1 : +v))) + DAY * 1000) + DAY * 1000;
+    return t >= from && t <= to;
+  });
+}
+
+function resultsTtl(year, races, empty) {
+  if (pastSeason(year) && !empty) return 30 * DAY;
+  if (empty) return 10 * MIN;
+  return hot(races || []) ? 10 * MIN : 6 * HOUR;
+}
+
+const RESULT_KEYS = { results: "Results", qualifying: "QualifyingResults", sprint: "SprintResults" };
+
+function cachedJSON(path) {
+  const txt = readFile(cacheFile(path));
+  if (!txt) return null;
+  try {
+    return JSON.parse(txt);
+  } catch (e) {
+    return null;
+  }
+}
+
+function sessionResults(year, round, kind, races) {
+  const path = `${year}/${round}/${kind}`;
+  // an empty response means the results aren't published yet: re-check it every 10 minutes
+  const c = cachedJSON(path);
+  const empty = !!(c && c.RaceTable && !(c.RaceTable.Races || []).length);
+  const r = api(path, resultsTtl(year, races, empty));
+  if (r.error) return r;
+  const race = (r.data.RaceTable && r.data.RaceTable.Races || [])[0];
+  return { race: race || null, rows: race ? race[RESULT_KEYS[kind]] || [] : [] };
+}
+
+function standings(year, which) {
+  const path = `${year}/${which}standings`;
+  const c = cachedJSON(path);
+  const empty = !!(c && c.StandingsTable && !(c.StandingsTable.StandingsLists || []).length);
+  const r = api(path, empty ? 10 * MIN : pastSeason(year) ? 30 * DAY : HOUR);
+  if (r.error) return r;
+  const lists = (r.data.StandingsTable && r.data.StandingsTable.StandingsLists) || [];
+  const l = lists[lists.length - 1];
+  const key = which === "driver" ? "DriverStandings" : "ConstructorStandings";
+  return { season: l ? +l.season : year, round: l ? +l.round : 0, rows: l ? l[key] || [] : [] };
+}
+
+// ---------- menu ----------
+
+const COMMANDS = [
+  ["drivers", "Driver Standings", "Points, wins, teams and the gap to the leader", "drivers"],
+  ["teams", "Team Standings", "Constructors’ championship", "teams"],
+  ["results", "Race Results", "Last race classification with the fastest lap; add a round number", "results"],
+  ["quali", "Qualifying", "Last qualifying with Q1, Q2 and Q3 times", "quali"],
+  ["sprint", "Sprint Results", "Last sprint classification", "sprint"],
+  ["schedule", "Season Schedule", "Every round with winners and upcoming races", "calendar"],
+];
+const ALIASES = {
+  drivers: "drivers", driver: "drivers", wdc: "drivers", standings: "drivers",
+  teams: "teams", team: "teams", constructors: "teams", constructor: "teams", wcc: "teams",
+  results: "results", result: "results", res: "results", winner: "results",
+  quali: "quali", qualifying: "quali", qualy: "quali", grid: "quali",
+  sprint: "sprint", sprints: "sprint",
+  schedule: "schedule", calendar: "schedule", cal: "schedule", season: "schedule", races: "schedule",
+  next: "next",
+};
+
+function menuItems(year, filter) {
+  const pre = year ? `${year} ` : "";
+  const f = fold(filter);
+  return COMMANDS.filter(([k, name]) => !f || k.startsWith(f) || fold(name).startsWith(f) || fold(name).split(" ").some((w) => w.startsWith(f)))
+    .map(([k, name, sub, icon]) => ({
+      title: year ? `${year} ${name}` : name,
+      subtitle: `${sub} · ${kw()} ${pre}${k}`,
+      autocomplete: `${pre}${k} `,
+      valid: false,
+      icon: { path: `icons/${icon}.png` },
+    }));
+}
+
+// ---------- next race weekend ----------
+
+function raceHeader(race, total, sessions) {
+  const [page, alt] = racePages(race);
+  const flag = countryFlag(race.Circuit.Location.country);
+  const loc = [race.Circuit.circuitName, race.Circuit.Location.locality].filter(Boolean).join(", ");
+  const live = sessions.find((s) => sessionState(s) === "live");
+  const next = sessions.find((s) => sessionState(s) === "upcoming" || sessionState(s) === "today");
+  let status = "";
+  if (live) status = `🔴 ${live.name} live now`;
+  else if (next) status = `${next.name} ${next.start ? until(next.start.getTime() - NOW.getTime()) : dayCountdown(next.date) + " (time TBC)"}`;
+  else status = "Weekend over";
+  const parts = [`Round ${race.round}${total ? ` of ${total}` : ""}`, loc];
+  if (isSprintWeekend(race)) parts.push("Sprint weekend");
+  parts.push(status);
+  const copy = [`${race.raceName} (${race.season}, round ${race.round})`, loc].concat(sessions.map((s) => `${s.name}: ${whenText(s)}`)).join("\n");
+  return {
+    title: withFlag(flag, race.raceName),
+    subtitle: parts.join(" · "),
+    arg: page ? `open:${page}` : "",
+    valid: !!page,
+    quicklookurl: page || undefined,
+    text: { copy, largetype: copy },
+    icon: { path: "icons/race.png" },
+    mods: {
+      cmd: { arg: `ics:${race.season}:${race.round}:all`, valid: true, subtitle: "Add every session of the weekend to Calendar" },
+      alt: { arg: alt ? `open:${alt}` : "", valid: !!alt, subtitle: alt ? `Open on ${pageName(alt)}` : "No other page" },
+    },
+  };
+}
+
+function sessionItem(race, s, withYear) {
+  const [page, alt] = racePages(race);
+  const state = sessionState(s);
+  let sub;
+  if (state === "live") sub = `🔴 Live now · started ${ago(NOW.getTime() - s.start.getTime())}`;
+  else if (state === "done") sub = "Finished";
+  else if (s.start) sub = until(s.start.getTime() - NOW.getTime());
+  else sub = `${dayCountdown(s.date)} · time to be confirmed`;
+  if (s.key === "Race" && state !== "done") sub += ` · ${race.Circuit.circuitName}`;
+  const text = `${race.raceName} ${s.name}: ${whenText(s, withYear)}`;
+  const done = state === "done";
+  return {
+    title: `${s.name}  ·  ${whenText(s, withYear)}`,
+    subtitle: sub,
+    arg: page ? `open:${page}` : "",
+    valid: !!page,
+    quicklookurl: page || undefined,
+    text: { copy: text, largetype: text },
+    icon: { path: `icons/${done ? "done" : state === "live" ? "live" : s.icon}.png` },
+    mods: {
+      cmd: done
+        ? { arg: "", valid: false, subtitle: "This session has finished" }
+        : { arg: `ics:${race.season}:${race.round}:${s.key}`, valid: true, subtitle: `Add ${s.name} to Calendar` },
+      alt: { arg: alt ? `open:${alt}` : "", valid: !!alt, subtitle: alt ? `Open on ${pageName(alt)}` : "No other page" },
+    },
+  };
+}
+
+function nextRaceItems() {
+  let sch = schedule(THIS_YEAR);
+  if (sch.error) return errorItems(sch, "the schedule").concat(menuItems(null, ""));
+  let races = sch.races, total = races.length;
+  let race = races.find((r) => !raceOver(r));
+  if (!race) {
+    const nxt = schedule(THIS_YEAR + 1);
+    if (!nxt.error && nxt.races.length) {
+      races = nxt.races;
+      total = races.length;
+      race = races.find((r) => !raceOver(r));
+    }
+  }
+  if (!race) {
+    const items = [info("Off-season: no upcoming races", `The ${THIS_YEAR + 1} calendar hasn’t been published yet`, "season")];
+    const last = sch.races[sch.races.length - 1];
+    if (last) items.push(info(`Last race: ${withFlag(countryFlag(last.Circuit.Location.country), last.raceName)}`, `${fmtDay(dateOnly(last.date), true)} · Tab for the results`, "results", { autocomplete: `${last.season} results ${last.round} ` }));
+    return items.concat(menuItems(null, ""));
+  }
+  const sessions = sessionsOf(race);
+  const withYear = +race.season !== THIS_YEAR;
+  return [raceHeader(race, total, sessions)].concat(sessions.map((s) => sessionItem(race, s, withYear)), menuItems(null, ""));
+}
+
+// ---------- standings ----------
+
+function driverName(d) {
+  return `${d.givenName} ${d.familyName}`;
+}
+
+function driverStandingItems(year, filter) {
+  let st = standings(year, "driver");
+  let note = null;
+  if (!st.error && !st.rows.length && year === THIS_YEAR) {
+    note = info(`The ${year} season hasn’t started yet`, `Showing the final ${year - 1} standings`, "info");
+    st = standings(year - 1, "driver");
+    year -= 1;
+  }
+  if (st.error) return errorItems(st, "the driver standings");
+  if (!st.rows.length) return [info(`No driver standings for ${year}`, "The season may not have started yet", "info")];
+  const leader = +st.rows[0].points;
+  const second = st.rows[1] ? +st.rows[1].points : leader;
+  const table = st.rows.map((r) => `${r.positionText || r.position}. ${driverName(r.Driver)} (${(r.Constructors || []).map((c) => c.name).join(", ")}) ${r.points} pts`).join("\n");
+  const f = fold(filter).trim();
+  const items = [];
+  if (note) items.push(note);
+  const final = isFinal(year, st.round);
+  items.push({
+    title: `${year} Drivers’ Championship`,
+    subtitle: `${final ? "Final standings" : `After round ${st.round}`} · ⌘↩ copies the table`,
+    arg: `copy:${table}`,
+    valid: true,
+    text: { copy: table, largetype: table },
+    icon: { path: "icons/drivers.png" },
+    mods: { cmd: { arg: `copy:${table}`, valid: true, subtitle: "Copy the standings table" } },
+  });
+  const rows = st.rows.filter((r) => {
+    if (!f) return true;
+    const hay = fold([driverName(r.Driver), r.Driver.code, r.Driver.permanentNumber, r.Driver.nationality, ...(r.Constructors || []).map((c) => c.name)].join(" "));
+    return f.split(/\s+/).every((w) => hay.includes(w));
+  });
+  if (!rows.length) items.push(info(`No driver matches “${filter.trim()}”`, "Search by name, code, number, nationality or team"));
+  for (const r of rows) {
+    const d = r.Driver, teams = r.Constructors || [];
+    const current = teams[teams.length - 1];
+    const pts = +r.points;
+    const pos = /^\d+$/.test(r.positionText || "") ? r.positionText : r.position || "–";
+    const gap = pos === "1" ? (st.rows.length > 1 ? `leads by ${fmtPts(pts - second)}` : "leader") : `−${fmtPts(leader - pts)} to the leader`;
+    const teamText = teams.map((c) => c.name).join(" → ");
+    // permanentNumber is the driver's number today, so only show it for the current season
+    const num = d.permanentNumber && year >= THIS_YEAR ? `  #${d.permanentNumber}` : "";
+    const title = `${pos}. ${withFlag(natFlag(d.nationality), driverName(d))}${num}`;
+    const text = `${pos}. ${driverName(d)} (${teamText}) ${r.points} pts, ${plural(+r.wins, "win")}`;
+    const url = /^https?:/.test(d.url || "") ? d.url.replace(/^http:/, "https:") : "";
+    items.push({
+      title: r.positionText === "D" ? `DSQ ${withFlag(natFlag(d.nationality), driverName(d))}` : title,
+      subtitle: `${fmtPts(pts)} pts · ${plural(+r.wins, "win")} · ${teamText || "—"} · ${gap}`,
+      arg: url ? `open:${url}` : "",
+      valid: !!url,
+      quicklookurl: url || undefined,
+      text: { copy: text, largetype: text },
+      icon: current ? teamIcon(current.constructorId) : { path: "icons/team-unknown.png" },
+      mods: { cmd: { arg: `copy:${table}`, valid: true, subtitle: "Copy the standings table" } },
+    });
+  }
+  return items;
+}
+
+function fmtPts(n) {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, "");
+}
+
+// A season's standings are final once the last scheduled round is in (only if the schedule is cached).
+function isFinal(year, round) {
+  if (year > THIS_YEAR) return false;
+  const path = `${year}/races`;
+  const txt = readFile(cacheFile(path));
+  if (!txt) return pastSeason(year);
+  try {
+    const races = JSON.parse(txt).RaceTable.Races;
+    return races.length > 0 && round >= +races[races.length - 1].round;
+  } catch (e) {
+    return pastSeason(year);
+  }
+}
+
+function teamStandingItems(year, filter) {
+  let st = standings(year, "constructor");
+  let note = null;
+  if (!st.error && !st.rows.length && year === THIS_YEAR) {
+    const prev = standings(year - 1, "constructor");
+    if (!prev.error && prev.rows.length) {
+      note = info(`The ${year} season hasn’t started yet`, `Showing the final ${year - 1} standings`, "info");
+      st = prev;
+      year -= 1;
+    }
+  }
+  if (st.error) return errorItems(st, "the team standings");
+  if (!st.rows.length) return [info(`No team standings for ${year}`, year < 1958 ? "The constructors’ championship started in 1958" : "The season may not have started yet", "info")];
+  const drivers = standings(year, "driver");
+  const byTeam = {};
+  if (!drivers.error) {
+    for (const r of drivers.rows) {
+      for (const c of r.Constructors || []) (byTeam[c.constructorId] = byTeam[c.constructorId] || []).push(r.Driver.familyName);
+    }
+  }
+  const leader = +st.rows[0].points;
+  const second = st.rows[1] ? +st.rows[1].points : leader;
+  const table = st.rows.map((r) => `${r.positionText || r.position}. ${r.Constructor.name} ${r.points} pts`).join("\n");
+  const items = [];
+  if (note) items.push(note);
+  items.push({
+    title: `${year} Constructors’ Championship`,
+    subtitle: `${isFinal(year, st.round) ? "Final standings" : `After round ${st.round}`} · ⌘↩ copies the table`,
+    arg: `copy:${table}`,
+    valid: true,
+    text: { copy: table, largetype: table },
+    icon: { path: "icons/teams.png" },
+    mods: { cmd: { arg: `copy:${table}`, valid: true, subtitle: "Copy the standings table" } },
+  });
+  const f = fold(filter).trim();
+  const rows = st.rows.filter((r) => !f || f.split(/\s+/).every((w) => fold([r.Constructor.name, r.Constructor.nationality, ...(byTeam[r.Constructor.constructorId] || [])].join(" ")).includes(w)));
+  if (!rows.length) items.push(info(`No team matches “${filter.trim()}”`, "Search by team, nationality or driver"));
+  for (const r of rows) {
+    const c = r.Constructor, pts = +r.points;
+    const pos = /^\d+$/.test(r.positionText || "") ? r.positionText : r.position || "–";
+    const gap = pos === "1" ? (st.rows.length > 1 ? `leads by ${fmtPts(pts - second)}` : "leader") : `−${fmtPts(leader - pts)} to the leader`;
+    const ds = byTeam[c.constructorId] || [];
+    const text = `${pos}. ${c.name} ${r.points} pts, ${plural(+r.wins, "win")}`;
+    const url = /^https?:/.test(c.url || "") ? c.url.replace(/^http:/, "https:") : "";
+    items.push({
+      title: `${pos}. ${withFlag(natFlag(c.nationality), c.name)}`,
+      subtitle: [`${fmtPts(pts)} pts`, plural(+r.wins, "win"), ds.join(", "), gap].filter(Boolean).join(" · "),
+      arg: url ? `open:${url}` : "",
+      valid: !!url,
+      quicklookurl: url || undefined,
+      text: { copy: text, largetype: text },
+      icon: teamIcon(c.constructorId),
+      mods: { cmd: { arg: `copy:${table}`, valid: true, subtitle: "Copy the standings table" } },
+    });
+  }
+  return items;
+}
+
+// ---------- results ----------
+
+const KINDS = {
+  results: { label: "Race", session: "Race", icon: "results" },
+  qualifying: { label: "Qualifying", session: "Qualifying", icon: "quali" },
+  sprint: { label: "Sprint", session: "Sprint", icon: "sprint" },
+};
+const STATUS_CODES = { R: "DNF", D: "DSQ", E: "EX", W: "DNS", F: "DNQ", N: "NC" };
+
+function lapMs(t) {
+  // "1:42.526" or "42.526" → milliseconds
+  const m = String(t || "").match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+  return m ? Math.round(((+m[1] || 0) * 60 + +m[2]) * 1000) : null;
+}
+function fmtGap(ms) {
+  return `+${(ms / 1000).toFixed(3)}`;
+}
+
+function kindSession(race, kind) {
+  const key = KINDS[kind].session;
+  return sessionsOf(race).find((s) => s.key === key || (kind === "sprint" && s.key === "Sprint")) || null;
+}
+
+function parseResultArgs(rest, kind) {
+  let round = null;
+  const words = [];
+  for (const w of rest) {
+    const l = fold(w);
+    if (/^\d{1,2}$/.test(l)) round = +l;
+    else if (["quali", "qualifying", "qualy", "q", "grid"].includes(l)) kind = "qualifying";
+    else if (["sprint", "sprints"].includes(l)) kind = "sprint";
+    else if (["race", "results", "result", "gp"].includes(l)) kind = "results";
+    else if (l !== "last" && l !== "round") words.push(l);
+  }
+  return { round, kind, text: words.join(" ") };
+}
+
+function matchRace(races, text) {
+  const f = fold(text);
+  return races.find((r) => fold([r.raceName, r.Circuit.circuitName, r.Circuit.circuitId, r.Circuit.Location.locality, r.Circuit.Location.country].join(" ")).includes(f)) || null;
+}
+
+function resultItems(year, rest, kind) {
+  const args = parseResultArgs(rest, kind);
+  kind = args.kind;
+  const K = KINDS[kind];
+  const sch = schedule(year);
+  if (sch.error) return errorItems(sch, "the schedule");
+  const races = sch.races;
+  if (!races.length) return [info(`No races in ${year}`, year > THIS_YEAR ? "The calendar hasn’t been published yet" : "", "info")];
+  let race = null;
+  const notes = [];
+  if (args.text) {
+    race = matchRace(races, args.text);
+    if (!race) return [info(`No ${year} race matches “${args.text}”`, "Try a round number, race, circuit, city or country")].concat(scheduleShortList(races, year, kind));
+  } else if (args.round !== null) {
+    race = races.find((r) => +r.round === args.round);
+    if (!race) return [info(`${year} has no round ${args.round}`, `Rounds 1 to ${races[races.length - 1].round}`)];
+  }
+  const explicit = !!race;
+  let candidates;
+  if (explicit) candidates = [race];
+  else {
+    // latest weekends where this session has started, newest first
+    candidates = races.filter((r) => {
+      const s = kindSession(r, kind);
+      return s && hasStarted(s);
+    }).reverse();
+    if (!candidates.length) {
+      const first = races.find((r) => kindSession(r, kind));
+      if (!first) return [info(`No ${K.label.toLowerCase()} results in ${year}`, kind === "sprint" ? "No sprint weekends that season" : "", "info")];
+      const s = kindSession(first, kind);
+      return [info(`No ${K.label.toLowerCase()} yet in ${year}`, `First: ${first.raceName} ${whenText(s)}`, "info")].concat(menuItems(year === THIS_YEAR ? null : year, ""));
+    }
+  }
+  let res = null, picked = null;
+  for (const [i, r] of candidates.slice(0, 3).entries()) {
+    const s = kindSession(r, kind);
+    if (!s) {
+      return [info(`${r.raceName} had no sprint`, "Sprint weekends have Sprint Qualifying and a Sprint on Saturday", "info")].concat(switchItems(year, r, races));
+    }
+    if (!hasStarted(s)) {
+      return [info(`${r.raceName} ${K.label.toLowerCase()} hasn’t happened yet`, `${whenText(s)} · ${s.start ? until(s.start.getTime() - NOW.getTime()) : dayCountdown(s.date)}`, "calendar")].concat(switchItems(year, r, races));
+    }
+    res = sessionResults(year, r.round, kind, races);
+    if (res.error) return errorItems(res, "the results");
+    if (res.rows.length) {
+      picked = r;
+      break;
+    }
+    notes.push(info(`${r.raceName} ${K.label.toLowerCase()} results aren’t published yet`, explicit ? "They usually appear within a few hours: try again later" : i < 2 ? "Showing the previous round" : "", "info"));
+    if (explicit) return notes.concat(switchItems(year, r, races));
+  }
+  if (!picked) return notes.length ? notes : [info("No results found", "", "info")];
+  return notes.concat(classification(picked, res, kind, races, year));
+}
+
+function classification(race, res, kind, races, year) {
+  const K = KINDS[kind];
+  const [page] = racePages(race);
+  const rows = res.rows;
+  const flag = countryFlag(race.Circuit.Location.country);
+  const winner = rows[0];
+  const withYear = +race.season !== THIS_YEAR;
+  const s = kindSession(race, kind);
+  const when = s ? (s.start ? fmtDay(s.start, withYear) : fmtDay(dateOnly(s.date), withYear)) : fmtDay(dateOnly(race.date), withYear);
+  const fl = rows.find((r) => r.FastestLap && r.FastestLap.rank === "1");
+  const winnerLaps = winner ? +winner.laps : 0;
+  const poleMs = kind === "qualifying" && winner ? lapMs(winner.Q3 || winner.Q2 || winner.Q1) : null;
+
+  const lines = [];
+  const items = [];
+  const rowItems = rows.map((r) => {
+    const d = r.Driver, c = r.Constructor || {};
+    const pt = r.positionText || r.position;
+    const pos = /^\d+$/.test(pt) ? `${pt}.` : STATUS_CODES[pt] || pt;
+    const name = withFlag(natFlag(d.nationality), driverName(d));
+    const parts = [c.name];
+    let summary;
+    if (kind === "qualifying") {
+      const best = r.Q3 || r.Q2 || r.Q1;
+      const seg = r.Q3 ? "Q3" : r.Q2 ? "Q2" : r.Q1 ? "Q1" : "";
+      const bestMs = lapMs(best);
+      summary = best ? `${seg} ${best}` : "No time";
+      parts.push(summary);
+      if (r.position !== "1" && bestMs && poleMs && seg === "Q3") parts.push(fmtGap(bestMs - poleMs));
+      const others = [["Q2", r.Q2], ["Q1", r.Q1]].filter(([q, t]) => t && q !== seg).map(([q, t]) => `${q} ${t}`);
+      if (others.length) parts.push(others.join(", "));
+    } else {
+      const lapped = +r.laps < winnerLaps && /^(Finished|Lapped|\+\d+ Laps?)$/.test(r.status || "");
+      if (/^\d+$/.test(pt) && lapped) summary = `+${plural(winnerLaps - +r.laps, "lap")}`;
+      else if (/^\d+$/.test(pt) && r.Time && r.Time.time) summary = r.Time.time;
+      else if (/^\d+$/.test(pt)) summary = r.status || "";
+      else summary = `${r.status || STATUS_CODES[pt] || ""}${r.laps ? ` (lap ${r.laps})` : ""}`;
+      parts.push(summary);
+      if (+r.points > 0) parts.push(`+${fmtPts(+r.points)} pts`);
+      const grid = +r.grid;
+      if (r.grid !== undefined) {
+        if (grid === 0) parts.push("pit lane start");
+        else if (/^\d+$/.test(pt)) {
+          const delta = grid - +pt;
+          parts.push(`grid ${grid}${delta > 0 ? ` ▲${delta}` : delta < 0 ? ` ▼${-delta}` : ""}`);
+        } else parts.push(`grid ${grid}`);
+      }
+      if (r.FastestLap && r.FastestLap.rank === "1") parts.push(`⏱ fastest lap ${r.FastestLap.Time ? r.FastestLap.Time.time : ""}`.trim());
+    }
+    lines.push(`${pos} ${driverName(d)} (${c.name}) ${summary}`);
+    const url = /^https?:/.test(d.url || "") ? d.url.replace(/^http:/, "https:") : "";
+    const text = `${pos} ${driverName(d)}, ${parts.join(", ")}`;
+    return {
+      title: `${pos} ${name}`,
+      subtitle: parts.filter(Boolean).join(" · "),
+      arg: url ? `open:${url}` : "",
+      valid: !!url,
+      quicklookurl: url || undefined,
+      text: { copy: text, largetype: text },
+      icon: teamIcon(c.constructorId),
+    };
+  });
+  const table = `${race.raceName} ${race.season} (${K.label})\n${lines.join("\n")}`;
+  for (const it of rowItems) it.mods = { cmd: { arg: `copy:${table}`, valid: true, subtitle: "Copy the classification" } };
+  const head = [`Round ${race.round}`, when];
+  if (winner) head.push(`${kind === "qualifying" ? "Pole" : "Winner"} ${winner.Driver.familyName}`);
+  if (fl && kind !== "qualifying") head.push(`Fastest lap ${fl.Driver.familyName}${fl.FastestLap.Time ? ` ${fl.FastestLap.Time.time}` : ""}`);
+  items.push({
+    title: `${withFlag(flag, race.raceName)} · ${K.label}`,
+    subtitle: head.join(" · "),
+    arg: page ? `open:${page}` : `copy:${table}`,
+    valid: true,
+    quicklookurl: page || undefined,
+    text: { copy: table, largetype: table },
+    icon: { path: `icons/${K.icon}.png` },
+    mods: { cmd: { arg: `copy:${table}`, valid: true, subtitle: "Copy the classification" } },
+  });
+  return items.concat(rowItems, switchItems(year, race, races, kind));
+}
+
+// Tab-completion shortcuts to other sessions and rounds of the same season
+function switchItems(year, race, races, current) {
+  const pre = +year === THIS_YEAR ? "" : `${year} `;
+  const items = [];
+  const kinds = [["results", "Race"], ["qualifying", "Qualifying"]];
+  if (isSprintWeekend(race)) kinds.push(["sprint", "Sprint"]);
+  const word = { results: "results", qualifying: "quali", sprint: "sprint" };
+  for (const [k, label] of kinds) {
+    if (k === current) continue;
+    items.push(info(`${label} · ${race.raceName}`, `Tab to show · ${kw()} ${pre}${word[k]} ${race.round}`, KINDS[k].icon, { autocomplete: `${pre}${word[k]} ${race.round} ` }));
+  }
+  const i = races.indexOf(race);
+  const w = word[current || "results"];
+  if (i > 0) items.push(info(`◀ Round ${races[i - 1].round} · ${races[i - 1].raceName}`, "Tab to show the previous round", "results", { autocomplete: `${pre}${w} ${races[i - 1].round} ` }));
+  if (i >= 0 && i < races.length - 1 && raceOver(races[i + 1])) items.push(info(`Round ${races[i + 1].round} · ${races[i + 1].raceName} ▶`, "Tab to show the next round", "results", { autocomplete: `${pre}${w} ${races[i + 1].round} ` }));
+  return items;
+}
+
+function scheduleShortList(races, year, kind) {
+  const pre = +year === THIS_YEAR ? "" : `${year} `;
+  const w = { results: "results", qualifying: "quali", sprint: "sprint" }[kind] || "results";
+  return races.filter(raceOver).slice(-5).reverse().map((r) => info(withFlag(countryFlag(r.Circuit.Location.country), r.raceName), `Round ${r.round} · Tab to show`, "results", { autocomplete: `${pre}${w} ${r.round} ` }));
+}
+
+// ---------- schedule ----------
+
+function scheduleItems(year, filter) {
+  const sch = schedule(year);
+  if (sch.error) return errorItems(sch, "the schedule");
+  const races = sch.races;
+  if (!races.length) return [info(`The ${year} calendar hasn’t been published yet`, "Try again closer to the season", "season")];
+  const pre = +year === THIS_YEAR ? "" : `${year} `;
+  const anyDone = races.some(raceOver);
+  const winners = {};
+  if (anyDone) {
+    const w = api(`${year}/results/1`, resultsTtl(year, races, false));
+    if (!w.error) for (const r of w.data.RaceTable.Races || []) if (r.Results && r.Results[0]) winners[r.round] = r.Results[0];
+  }
+  const next = races.find((r) => !raceOver(r));
+  const withYear = +year !== THIS_YEAR;
+  const f = fold(filter).trim();
+  const shown = races.filter((r) => !f || f.split(/\s+/).every((wd) => fold([r.raceName, r.Circuit.circuitName, r.Circuit.Location.locality, r.Circuit.Location.country, `round ${r.round}`].join(" ")).includes(wd)));
+  const items = [];
+  if (!shown.length) items.push(info(`No ${year} race matches “${filter.trim()}”`, "Search by race, circuit, city or country"));
+  for (const r of shown) {
+    const [page, alt] = racePages(r);
+    const st = raceStart(r);
+    const when = st ? `${fmtDay(st, withYear)} ${fmtTime(st)}` : `${fmtDay(dateOnly(r.date), withYear)}`;
+    const over = raceOver(r);
+    const flag = countryFlag(r.Circuit.Location.country);
+    const parts = [];
+    let icon = "calendar";
+    if (over) {
+      icon = "done";
+      const w = winners[r.round];
+      parts.push(`✓ ${when}`);
+      parts.push(w ? `Winner ${driverName(w.Driver)} (${w.Constructor.name})` : "Results pending");
+    } else if (r === next) {
+      icon = "next";
+      const sessions = sessionsOf(r);
+      const upcoming = sessions.find((s) => sessionState(s) !== "done");
+      parts.push(`Next · ${when}`);
+      if (st) parts.push(until(st.getTime() - NOW.getTime()));
+      else parts.push(dayCountdown(r.date));
+      if (upcoming && upcoming.key !== "Race" && hasStarted(sessions[0])) parts.push(`${upcoming.name} ${sessionState(upcoming) === "live" ? "live now" : "next"}`);
+    } else {
+      parts.push(when);
+    }
+    parts.push(r.Circuit.Location.locality || r.Circuit.circuitName);
+    if (isSprintWeekend(r)) parts.push("Sprint");
+    const text = `Round ${r.round}: ${r.raceName}, ${when}`;
+    items.push({
+      title: `${r.round}. ${withFlag(flag, r.raceName)}`,
+      subtitle: parts.join(" · "),
+      arg: page ? `open:${page}` : "",
+      valid: !!page,
+      quicklookurl: page || undefined,
+      autocomplete: over ? `${pre}results ${r.round} ` : undefined,
+      text: { copy: text, largetype: text },
+      icon: { path: `icons/${icon}.png` },
+      mods: {
+        cmd: over
+          ? { arg: "", valid: false, subtitle: "This race weekend is over · Tab shows the results" }
+          : { arg: `ics:${r.season}:${r.round}:all`, valid: true, subtitle: "Add every session of the weekend to Calendar" },
+        alt: { arg: alt ? `open:${alt}` : "", valid: !!alt, subtitle: alt ? `Open on ${pageName(alt)}` : "No other page" },
+      },
+    });
+  }
+  return items;
+}
+
+// ---------- seasons ----------
+
+function seasonItems(year) {
+  const items = [];
+  if (year < THIS_YEAR) {
+    const st = standings(year, "driver");
+    if (!st.error && st.rows.length) {
+      const c = st.rows[0];
+      items.push(info(`${year} Champion: ${withFlag(natFlag(c.Driver.nationality), driverName(c.Driver))}`, `${fmtPts(+c.points)} pts · ${plural(+c.wins, "win")} · ${(c.Constructors || []).map((x) => x.name).join(" → ")}`, "drivers", { autocomplete: `${year} drivers ` }));
+    }
+  }
+  return items.concat(menuItems(year, ""));
+}
+
+// ---------- calendar ----------
+
+function icsEscape(s) {
+  return String(s).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+}
+function utf8Len(ch) {
+  return unescape(encodeURIComponent(ch)).length;
+}
+// Fold content lines at 75 octets (RFC 5545 §3.1) without splitting a character.
+function icsFold(line) {
+  const out = [];
+  let cur = "", len = 0, limit = 75;
+  for (const ch of line) {
+    const n = utf8Len(ch);
+    if (len + n > limit) {
+      out.push(cur);
+      cur = "";
+      len = 0;
+      limit = 74; // continuation lines start with a space
+    }
+    cur += ch;
+    len += n;
+  }
+  out.push(cur);
+  return out.join("\r\n ");
+}
+function icsStamp(d) {
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+}
+
+function buildIcs(race, sessions) {
+  const loc = [race.Circuit.circuitName, race.Circuit.Location.locality, race.Circuit.Location.country].filter(Boolean).join(", ");
+  const [page] = racePages(race);
+  const alert = +env("calendar_alert", "15") || 0;
+  const L = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//x-o-r-r-o//Alfred F1//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH"];
+  for (const s of sessions) {
+    L.push("BEGIN:VEVENT");
+    L.push(`UID:f1-${race.season}-${race.round}-${s.key.toLowerCase()}@io.github.x-o-r-r-o.f1`);
+    L.push(`DTSTAMP:${icsStamp(new Date())}`);
+    if (s.start) {
+      L.push(`DTSTART:${icsStamp(s.start)}`);
+      L.push(`DTEND:${icsStamp(new Date(s.start.getTime() + s.dur * 60000))}`);
+    } else {
+      const [y, m, d] = s.date.split("-").map(Number);
+      const next = new Date(Date.UTC(y, m - 1, d + 1));
+      L.push(`DTSTART;VALUE=DATE:${s.date.replace(/-/g, "")}`);
+      L.push(`DTEND;VALUE=DATE:${next.getUTCFullYear()}${pad(next.getUTCMonth() + 1)}${pad(next.getUTCDate())}`);
+    }
+    L.push(`SUMMARY:${icsEscape(`F1 ${race.raceName}: ${s.name}`)}`);
+    L.push(`LOCATION:${icsEscape(loc)}`);
+    L.push(`DESCRIPTION:${icsEscape(`Round ${race.round} of the ${race.season} Formula 1 World Championship${s.start ? "" : "\nStart time to be confirmed"}`)}`);
+    if (page) L.push(`URL:${page}`);
+    if (alert > 0 && s.start) L.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${icsEscape(`${s.name} starts in ${alert} minutes`)}`, `TRIGGER:-PT${alert}M`, "END:VALARM");
+    L.push("END:VEVENT");
+  }
+  L.push("END:VCALENDAR");
+  return L.map(icsFold).join("\r\n") + "\r\n";
+}
+
+// ---------- actions ----------
+
+function openURL(url) {
+  if (!/^https?:\/\/[^\s]+$/.test(url)) return "Invalid link";
+  const u = $.NSURL.URLWithString(url);
+  if (u.isNil()) return "Invalid link";
+  if (env("F1_TEST_NO_OPEN", "") !== "1") $.NSWorkspace.sharedWorkspace.openURL(u);
+  return "";
+}
+
+function act(arg) {
+  const m = String(arg).match(/^(\w+):([\s\S]*)$/);
+  if (!m) return "";
+  const [, kind, rest] = m;
+  if (kind === "open") return openURL(rest);
+  if (kind === "copy") {
+    const pb = $.NSPasteboard.generalPasteboard;
+    if (env("F1_TEST_NO_OPEN", "") !== "1") {
+      pb.clearContents;
+      pb.setStringForType($(rest), $.NSPasteboardTypeString);
+    }
+    return "Copied to the clipboard";
+  }
+  if (kind === "ics") {
+    const p = rest.match(/^(\d{4}):(\d{1,2}):(\w+)$/);
+    if (!p) return "Invalid calendar request";
+    const sch = schedule(+p[1]);
+    if (sch.error) return sch.error;
+    const race = sch.races.find((r) => r.round === p[2]);
+    if (!race) return "That race is no longer on the calendar";
+    const all = sessionsOf(race);
+    const sessions = p[3] === "all" ? all : all.filter((s) => s.key === p[3]);
+    if (!sessions.length) return "That session is no longer on the schedule";
+    const dir = `${cacheDir()}/ics`;
+    $.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(dir, true, $(), $());
+    const file = `${dir}/f1-${race.season}-${race.round}-${p[3]}.ics`;
+    if (!writeFile(file, buildIcs(race, sessions))) return "Could not write the calendar file";
+    if (env("F1_TEST_NO_OPEN", "") !== "1") $.NSWorkspace.sharedWorkspace.openURL($.NSURL.fileURLWithPath(file));
+    return "";
+  }
+  return "";
+}
+
+// ---------- entry ----------
+
+function raceCommand(query) {
+  const words = String(query || "").replace(/[\u0000-\u001f]/g, " ").trim().split(/\s+/).filter(Boolean);
+  let year = null;
+  if (words.length && /^\d{4}$/.test(words[0])) {
+    year = +words.shift();
+    if (year < 1950 || year > THIS_YEAR + 1) return [info(`No Formula 1 season in ${year}`, `Seasons run from 1950 to ${THIS_YEAR + 1}`, "error")];
+  }
+  const y = year || THIS_YEAR;
+  if (!words.length) return year ? seasonItems(year) : nextRaceItems();
+  const word = fold(words[0]);
+  const cmd = ALIASES[word];
+  const rest = words.slice(1);
+  switch (cmd) {
+    case "next": return nextRaceItems();
+    case "drivers": return driverStandingItems(y, rest.join(" "));
+    case "teams": return teamStandingItems(y, rest.join(" "));
+    case "results": return resultItems(y, rest, "results");
+    case "quali": return resultItems(y, rest, "qualifying");
+    case "sprint": return resultItems(y, rest, "sprint");
+    case "schedule": return scheduleItems(y, rest.join(" "));
+  }
+  const menu = menuItems(year, words[0]);
+  if (menu.length) return menu;
+  // anything else searches the season's races
+  return scheduleItems(y, words.join(" "));
+}
+
+function run(argv) {
+  const [cmd, ...rest] = argv;
+  const query = rest.join(" ");
+  try {
+    switch (cmd) {
+      case "race": return output(raceCommand(query));
+      case "act": return act(query);
+      case "refresh": return backgroundRefresh(query);
+      default: return output([info(`Unknown command: ${cmd}`, "", "error")]);
+    }
+  } catch (e) {
+    if (cmd === "act" || cmd === "refresh") return String(e && e.message ? e.message : e);
+    return output([info("Formula 1 error", String(e && e.message ? e.message : e), "error")]);
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "bundleid": "io.github.x-o-r-r-o.f1",
+  "name": "Formula 1",
+  "description": "Next race weekend in local time, standings, results and the season schedule",
+  "category": "Internet",
+  "createdby": "x-o-r-r-o",
+  "webaddress": "https://github.com/x-o-r-r-o/alfred-f1",
+  "version": "1.0.0",
+  "variablesdontexport": [],
+  "config": [
+    {
+      "type": "textfield",
+      "variable": "keyword_race",
+      "label": "Keyword",
+      "description": "Next race weekend, standings, results and schedule",
+      "config": {
+        "default": "race",
+        "placeholder": "race",
+        "required": true,
+        "trim": true
+      }
+    },
+    {
+      "type": "popupbutton",
+      "variable": "race_page",
+      "label": "Race page (↩)",
+      "description": "⌥↩ opens the other one",
+      "config": {
+        "default": "f1",
+        "pairs": [
+          ["formula1.com", "f1"],
+          ["Wikipedia", "wikipedia"]
+        ]
+      }
+    },
+    {
+      "type": "popupbutton",
+      "variable": "time_format",
+      "label": "Time format",
+      "description": "",
+      "config": {
+        "default": "system",
+        "pairs": [
+          ["Same as macOS", "system"],
+          ["24-hour", "24"],
+          ["12-hour", "12"]
+        ]
+      }
+    },
+    {
+      "type": "popupbutton",
+      "variable": "calendar_alert",
+      "label": "Calendar alert (⌘↩)",
+      "description": "Reminder added to sessions saved to Calendar",
+      "config": {
+        "default": "15",
+        "pairs": [
+          ["None", "0"],
+          ["5 minutes before", "5"],
+          ["15 minutes before", "15"],
+          ["30 minutes before", "30"],
+          ["1 hour before", "60"]
+        ]
+      }
+    }
+  ],
+  "objects": [
+    {
+      "id": "sf_race",
+      "type": "scriptfilter",
+      "keyword": "{var:keyword_race}",
+      "title": "Formula 1",
+      "subtext": "Next race weekend, standings, results and schedule",
+      "running": "Loading Formula 1 data…",
+      "script": "osascript -l JavaScript ./f1.js race \"$1\""
+    },
+    {
+      "id": "hotkey",
+      "type": "hotkey",
+      "argument": 0,
+      "note": "Set a Hotkey to show the next race weekend"
+    },
+    {
+      "id": "act",
+      "type": "script",
+      "script": "osascript -l JavaScript ./f1.js act \"$1\"",
+      "note": "Opens pages, copies tables, and writes .ics files for Calendar"
+    },
+    {
+      "id": "notify",
+      "type": "notification"
+    }
+  ],
+  "connections": [
+    { "from": "hotkey", "to": "sf_race" },
+    { "from": "sf_race", "to": "act" },
+    { "from": "sf_race", "to": "act", "mod": "cmd" },
+    { "from": "sf_race", "to": "act", "mod": "alt" },
+    { "from": "act", "to": "notify" }
+  ]
+}
