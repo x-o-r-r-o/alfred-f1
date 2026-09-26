@@ -49,6 +49,20 @@
     },
     {
       "type": "popupbutton",
+      "variable": "date_format",
+      "label": "Date format",
+      "description": "",
+      "config": {
+        "default": "system",
+        "pairs": [
+          ["Same as macOS", "system"],
+          ["Fri 2 Oct", "dmy"],
+          ["Fri Oct 2", "mdy"]
+        ]
+      }
+    },
+    {
+      "type": "popupbutton",
       "variable": "calendar_alert",
       "label": "Calendar alert (⌘↩)",
       "description": "Reminder added to sessions saved to Calendar",

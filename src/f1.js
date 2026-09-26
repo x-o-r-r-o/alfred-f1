@@ -150,10 +150,25 @@ function use12h() {
 }
 const H12 = use12h();
 
+// "Fri 2 Oct" or "Fri Oct 2": the Workflow Configuration, or the macOS region's order.
+function monthFirst() {
+  const f = env("date_format", "system");
+  if (f === "dmy") return false;
+  if (f === "mdy") return true;
+  try {
+    const t = $.NSDateFormatter.dateFormatFromTemplateOptionsLocale("MMMd", 0, $.NSLocale.currentLocale);
+    return !t.isNil() && t.js.indexOf("M") < t.js.indexOf("d");
+  } catch (e) {
+    return false;
+  }
+}
+const MDY = monthFirst();
+
 function pad(n) {
   return String(n).padStart(2, "0");
 }
 function fmtDay(d, withYear) {
+  if (MDY) return `${DOW[d.getDay()]} ${MON[d.getMonth()]} ${d.getDate()}${withYear ? ", " + d.getFullYear() : ""}`;
   return `${DOW[d.getDay()]} ${d.getDate()} ${MON[d.getMonth()]}${withYear ? " " + d.getFullYear() : ""}`;
 }
 function fmtTime(d) {
@@ -281,8 +296,12 @@ function f1Url(race) {
   if (!slug || +race.season < 2018) return null;
   return `https://www.formula1.com/en/racing/${race.season}/${slug}`;
 }
+// Only plain http(s) links from the API (no whitespace or control characters: they end up in .ics files).
+function safeUrl(u) {
+  return /^https?:\/\/[^\s"<>\\\u0000-\u001f\u007f]+$/.test(u || "") ? u.replace(/^http:/, "https:") : "";
+}
 function wikiUrl(race) {
-  return /^https?:\/\//.test(race.url || "") ? race.url.replace(/^http:/, "https:") : null;
+  return safeUrl(race.url) || null;
 }
 // [primary, alternative] race pages, following the Workflow Configuration
 function racePages(race) {
@@ -315,13 +334,84 @@ function run_(path, args) {
 
 const CURL_ERRORS = { 6: "No internet connection (could not resolve the host)", 7: "Could not connect to the F1 API", 28: "The F1 API timed out", 35: "Secure connection failed", 52: "The F1 API returned nothing", 56: "The connection was interrupted" };
 
+// ---------- rate limiting (shared by every process through the cache folder) ----------
+// Jolpica allows 4 requests a second and 500 an hour. A keystroke storm (each keystroke runs a
+// Script Filter) plus background refreshers must stay well below that, so every request reserves
+// a slot in a small log: at most RATE_BURST requests in any second and RATE_HOURLY in any hour.
+const RATE_BURST = 3;
+const RATE_HOURLY = 400;
+const RATE_MAX_WAIT = 4000; // ms: give up (and show cached data) rather than queue for longer
+const COOLDOWN = 60; // seconds without any request after an HTTP 429
+const RATE_MSG = "The F1 API is rate limiting requests (HTTP 429): try again in a minute";
+
+function mkdirExclusive(path) {
+  return !!$.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, false, $(), $());
+}
+
+// Run fn while holding a short mutex (mkdir is atomic). A lock left by a killed process expires.
+function withMutex(path, fn) {
+  for (let i = 0; i < 200; i++) {
+    if (mkdirExclusive(path)) {
+      try {
+        return fn();
+      } finally {
+        removeFile(path);
+      }
+    }
+    const a = fileAge(path);
+    if (a !== null && a > 3) removeFile(path);
+    else $.NSThread.sleepForTimeInterval(0.01);
+  }
+  return fn();
+}
+
+// Reserve a request slot. Returns null (go ahead) or { error, status }.
+function throttle() {
+  const dir = `${cacheDir()}/api`;
+  const cool = fileAge(`${dir}/.cooldown`);
+  if (cool !== null && cool < COOLDOWN) return { error: RATE_MSG, status: 429 };
+  let wait = 0, err = null;
+  withMutex(`${dir}/.rate.lock`, () => {
+    const t = Date.now();
+    let log = [];
+    try {
+      log = JSON.parse(readFile(`${dir}/.rate.json`) || "[]");
+      if (!Array.isArray(log)) log = [];
+    } catch (e) {
+      log = [];
+    }
+    log = log.filter((x) => typeof x === "number" && x > t - HOUR * 1000 && x < t + 60000).sort((a, b) => a - b);
+    if (log.length >= RATE_HOURLY) {
+      err = { error: "Hourly request limit reached: try again later", status: 429 };
+      return;
+    }
+    let slot = Math.max(t, log.length ? log[log.length - 1] : 0);
+    if (log.length >= RATE_BURST) slot = Math.max(slot, log[log.length - RATE_BURST] + 1000);
+    if (slot - t > RATE_MAX_WAIT) {
+      err = { error: "Too many requests at once: try again in a few seconds", status: 429 };
+      return;
+    }
+    log.push(slot);
+    writeFile(`${dir}/.rate.json`, JSON.stringify(log));
+    wait = slot - t;
+  });
+  if (err) return err;
+  if (wait > 0) $.NSThread.sleepForTimeInterval(wait / 1000);
+  return null;
+}
+
 // One GET. Returns { data } (MRData) or { error, status }.
 function httpGet(url) {
+  const blocked = throttle();
+  if (blocked) return blocked;
   const r = run_("/usr/bin/curl", ["-sS", "-L", "--compressed", "--connect-timeout", "4", "--max-time", "12", "-A", UA, "-H", "Accept: application/json", "-w", "\n%{http_code}", url]);
   if (r.status !== 0) return { error: CURL_ERRORS[r.status] || `Network error (curl ${r.status})`, status: 0 };
   const cut = r.out.lastIndexOf("\n");
   const code = +r.out.slice(cut + 1), body = r.out.slice(0, cut);
-  if (code === 429) return { error: "The F1 API is rate limiting requests (HTTP 429): try again in a minute", status: 429 };
+  if (code === 429) {
+    writeFile(`${cacheDir()}/api/.cooldown`, String(Date.now()));
+    return { error: RATE_MSG, status: 429 };
+  }
   if (code !== 200) return { error: `The F1 API returned HTTP ${code}`, status: code };
   try {
     const j = JSON.parse(body);
@@ -354,14 +444,15 @@ function mergePage(a, b) {
   }
 }
 
-// Fetch every page of an endpoint (politely: at most 5 pages, 300 ms apart).
-function fetchAll(path) {
+// Fetch every page of an endpoint (at most 10; throttle() spaces the requests).
+// deadline (ms since the epoch) bounds a background refresh, so it always ends before its lock expires.
+function fetchAll(path, deadline) {
   const first = httpGet(`${API_BASE}/${path}/?limit=${PAGE}`);
   if (first.error) return first;
   const total = +first.data.total || 0;
   const step = +first.data.limit || PAGE; // the API may cap the page size below what was asked
   for (let off = step, n = 1; off < total && n < 10; off += step, n++) {
-    $.NSThread.sleepForTimeInterval(0.3);
+    if (deadline && Date.now() > deadline) return { error: "The F1 API timed out", status: 0 };
     const p = httpGet(`${API_BASE}/${path}/?limit=${step}&offset=${off}`);
     if (p.error) return p;
     mergePage(first.data, p.data);
@@ -373,20 +464,40 @@ function cacheFile(path) {
   return `${cacheDir()}/api/${path.replace(/[^A-Za-z0-9]+/g, "_")}.json`;
 }
 
-function refreshNow(path) {
+function refreshNow(path, deadline) {
   const file = cacheFile(path);
-  const r = fetchAll(path);
+  const r = fetchAll(path, deadline);
   if (r.data) {
     writeFile(file, JSON.stringify(r.data));
     removeFile(`${file}.attempt`);
+    pruneCache(false);
   }
   return r;
 }
 
+// A background refresh holds `<file>.lock` (a folder: mkdir is atomic, so two Script Filters
+// can never both start one). It stops fetching after BG_DEADLINE, and a lock older than
+// LOCK_TTL (left by a refresher that was killed) is taken over.
+const LOCK_TTL = 90; // seconds
+const BG_DEADLINE = 60; // seconds; plus one curl --max-time (12 s) is still < LOCK_TTL
+
+function takeLock(lock) {
+  if (mkdirExclusive(lock)) return true;
+  const a = fileAge(lock);
+  if (a === null || a < LOCK_TTL) return false;
+  removeFile(lock);
+  return mkdirExclusive(lock);
+}
+
 // Refresh a stale cache entry in a separate process, so Alfred shows the cached data at once.
+// NSTask starts the child in its own process group and it is reparented to launchd when the
+// Script Filter exits, so Alfred terminating the Script Filter on the next keystroke (SIGTERM
+// to the process or its group) doesn't stop the refresh; stdio go to /dev/null, so Alfred
+// doesn't wait for it either.
 function refreshInBackground(path) {
   const file = cacheFile(path);
-  writeFile(`${file}.lock`, String(Date.now()));
+  const lock = `${file}.lock`;
+  if (!takeLock(lock)) return; // another process is already refreshing this entry
   writeFile(`${file}.attempt`, JSON.stringify({ status: 0, error: "The update was interrupted" }));
   const script = `${$.NSFileManager.defaultManager.currentDirectoryPath.js}/f1.js`;
   const task = $.NSTask.alloc.init;
@@ -395,17 +506,58 @@ function refreshInBackground(path) {
   task.standardOutput = $.NSFileHandle.fileHandleWithNullDevice;
   task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
   task.standardInput = $.NSFileHandle.fileHandleWithNullDevice;
-  if (!task.launchAndReturnError($())) removeFile(`${file}.lock`);
+  if (!task.launchAndReturnError($())) removeFile(lock);
 }
 
 // Background entry point: fetch, then record the outcome for the next Script Filter run.
 function backgroundRefresh(path) {
   const file = cacheFile(path);
-  const r = refreshNow(path);
-  if (r.error) writeFile(`${file}.attempt`, JSON.stringify({ status: r.status, error: r.error }));
-  else removeFile(`${file}.attempt`);
-  removeFile(`${file}.lock`);
+  try {
+    const r = refreshNow(path, Date.now() + BG_DEADLINE * 1000);
+    if (r.error) writeFile(`${file}.attempt`, JSON.stringify({ status: r.status, error: r.error }));
+    else removeFile(`${file}.attempt`);
+  } finally {
+    removeFile(`${file}.lock`);
+  }
   return "";
+}
+
+// Keep the cache small: once a day, drop API responses nobody has needed for 60 days (anything
+// read after its TTL is rewritten by a refresh), keep at most CACHE_MAX_FILES of them, and remove
+// calendar files, stale locks and old failure records.
+const CACHE_MAX_AGE = 60 * DAY;
+const CACHE_MAX_FILES = 300;
+
+function listDir(dir) {
+  const a = $.NSFileManager.defaultManager.contentsOfDirectoryAtPathError(dir, $());
+  return a.isNil() ? [] : ObjC.deepUnwrap(a) || [];
+}
+
+function pruneCache(force) {
+  const root = cacheDir();
+  const marker = `${root}/.pruned`;
+  const last = fileAge(marker);
+  if (!force && last !== null && last < DAY) return;
+  writeFile(marker, "");
+  const api = `${root}/api`;
+  const data = [];
+  for (const name of listDir(api)) {
+    const p = `${api}/${name}`;
+    const a = fileAge(p);
+    if (a === null) continue;
+    if (/\.json$/.test(name) && !name.startsWith(".")) {
+      if (a > CACHE_MAX_AGE) removeFile(p);
+      else data.push([a, p]);
+    } else if (/\.json\.attempt$/.test(name) && a > DAY) removeFile(p);
+    else if (/\.json\.lock$/.test(name) && a > LOCK_TTL) removeFile(p);
+  }
+  data.sort((x, y) => x[0] - y[0]);
+  for (const [, p] of data.slice(CACHE_MAX_FILES)) removeFile(p);
+  const ics = `${root}/ics`;
+  for (const name of listDir(ics)) {
+    const a = fileAge(`${ics}/${name}`);
+    if (a !== null && a > DAY) removeFile(`${ics}/${name}`);
+  }
 }
 
 function staleNotice(age, error, status) {
@@ -432,7 +584,7 @@ function api(path, ttl) {
   if (data) {
     const lockAge = fileAge(`${file}.lock`);
     const attemptAge = fileAge(`${file}.attempt`);
-    if (lockAge !== null && lockAge < 30) {
+    if (lockAge !== null && lockAge < LOCK_TTL) {
       RERUN = 0.5;
       return { data, refreshing: true };
     }
@@ -723,7 +875,7 @@ function driverStandingItems(year, filter) {
     const num = d.permanentNumber && year >= THIS_YEAR ? `  #${d.permanentNumber}` : "";
     const title = `${pos}. ${withFlag(natFlag(d.nationality), driverName(d))}${num}`;
     const text = `${pos}. ${driverName(d)} (${teamText}) ${r.points} pts, ${plural(+r.wins, "win")}`;
-    const url = /^https?:/.test(d.url || "") ? d.url.replace(/^http:/, "https:") : "";
+    const url = safeUrl(d.url);
     items.push({
       title: r.positionText === "D" ? `DSQ ${withFlag(natFlag(d.nationality), driverName(d))}` : title,
       subtitle: `${ptsText(pts)} · ${plural(+r.wins, "win")} · ${teamText || "—"} · ${gap}`,
@@ -809,7 +961,7 @@ function teamStandingItems(year, filter) {
     const gap = gapText(pos, pts, leader, second, st.rows.length);
     const ds = byTeam[c.constructorId] || [];
     const text = `${pos}. ${c.name} ${r.points} pts, ${plural(+r.wins, "win")}`;
-    const url = /^https?:/.test(c.url || "") ? c.url.replace(/^http:/, "https:") : "";
+    const url = safeUrl(c.url);
     items.push({
       title: `${pos}. ${withFlag(natFlag(c.nationality), c.name)}`,
       subtitle: [ptsText(pts), plural(+r.wins, "win"), ds.join(", "), gap].filter(Boolean).join(" · "),
@@ -980,7 +1132,7 @@ function classification(race, res, kind, races, year) {
       if (r.FastestLap && r.FastestLap.rank === "1") parts.push(`⏱ fastest lap ${r.FastestLap.Time ? r.FastestLap.Time.time : ""}`.trim());
     }
     lines.push(`${pos} ${driverName(d)} (${c.name}) ${summary}`);
-    const url = /^https?:/.test(d.url || "") ? d.url.replace(/^http:/, "https:") : "";
+    const url = safeUrl(d.url);
     const text = `${pos} ${driverName(d)}, ${parts.join(", ")}`;
     return {
       title: `${pos} ${name}`,
@@ -1128,13 +1280,33 @@ function seasonItems(year) {
 
 // ---------- calendar ----------
 
+// Replace unpaired UTF-16 surrogates (they can't be written as UTF-8) with U+FFFD.
+function wellFormed(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const n = s.charCodeAt(i + 1);
+      if (n >= 0xdc00 && n <= 0xdfff) {
+        out += s[i] + s[i + 1];
+        i++;
+      } else out += "\ufffd";
+    } else if (c >= 0xdc00 && c <= 0xdfff) out += "\ufffd";
+    else out += s[i];
+  }
+  return out;
+}
+// TEXT value (RFC 5545 §3.3.11): escape \ ; , and newlines; other control characters aren't allowed.
 function icsEscape(s) {
-  return String(s).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+  return wellFormed(String(s))
+    .replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,")
+    .replace(/\r\n|\r|\n/g, "\\n").replace(/[\u0000-\u001f\u007f]/g, " ");
 }
 function utf8Len(ch) {
-  return unescape(encodeURIComponent(ch)).length;
+  const c = ch.codePointAt(0);
+  return c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
 }
-// Fold content lines at 75 octets (RFC 5545 §3.1) without splitting a character.
+// Fold content lines at 75 octets (RFC 5545 §3.1) without splitting a UTF-8 sequence.
 function icsFold(line) {
   const out = [];
   let cur = "", len = 0, limit = 75;
@@ -1159,11 +1331,11 @@ function icsStamp(d) {
 function buildIcs(race, sessions) {
   const loc = [race.Circuit.circuitName, race.Circuit.Location.locality, race.Circuit.Location.country].filter(Boolean).join(", ");
   const [page] = racePages(race);
-  const alert = +env("calendar_alert", "15") || 0;
+  const alert = Math.floor(+env("calendar_alert", "15")) || 0;
   const L = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//x-o-r-r-o//Alfred F1//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH"];
   for (const s of sessions) {
     L.push("BEGIN:VEVENT");
-    L.push(`UID:f1-${race.season}-${race.round}-${s.key.toLowerCase()}@io.github.x-o-r-r-o.f1`);
+    L.push(`UID:f1-${+race.season}-${+race.round}-${s.key.toLowerCase()}@io.github.x-o-r-r-o.f1`);
     L.push(`DTSTAMP:${icsStamp(new Date())}`);
     if (s.start) {
       L.push(`DTSTART:${icsStamp(s.start)}`);
@@ -1220,7 +1392,8 @@ function act(arg) {
     if (!sessions.length) return "That session is no longer on the schedule";
     const dir = `${cacheDir()}/ics`;
     $.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(dir, true, $(), $());
-    const file = `${dir}/f1-${race.season}-${race.round}-${p[3]}.ics`;
+    pruneCache(false);
+    const file = `${dir}/f1-${p[1]}-${p[2]}-${p[3]}.ics`;
     if (!writeFile(file, buildIcs(race, sessions))) return "Could not write the calendar file";
     if (env("F1_TEST_NO_OPEN", "") !== "1") $.NSWorkspace.sharedWorkspace.openURL($.NSURL.fileURLWithPath(file));
     return "";

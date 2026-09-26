@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end tests: run the Script Filter the way Alfred does, against a mock of the Jolpica API
 serving real responses saved in tests/fixtures, with an injectable clock (F1_NOW) and time zone (TZ)."""
-import copy, json, os, plistlib, re, shutil, subprocess, sys, tempfile, threading, time, unittest
+import copy, json, os, plistlib, re, shutil, signal, subprocess, sys, tempfile, threading, time, unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -25,7 +25,9 @@ class Mock:
     mode = "ok"          # ok | down (503) | 429 | html
     overrides = {}       # path -> JSON document
     page_size = None     # force pagination
+    delay = 0            # seconds before answering
     hits = []
+    times = []           # arrival time of each request
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -36,6 +38,9 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         path = u.path.replace("/ergast/f1/", "", 1).strip("/")
         Mock.hits.append(path)
+        Mock.times.append(time.time())
+        if Mock.delay:
+            time.sleep(Mock.delay)
         if Mock.mode == "down":
             return self.reply(503, b"Service Unavailable", "text/plain")
         if Mock.mode == "429":
@@ -82,7 +87,7 @@ def new_cache():
 
 
 def run_js(args, cache, now=None, tz="Europe/London", **env):
-    e = dict(os.environ, alfred_workflow_cache=cache, F1_API_BASE=BASE, TZ=tz, time_format="24", F1_TEST_NO_OPEN="1")
+    e = dict(os.environ, alfred_workflow_cache=cache, F1_API_BASE=BASE, TZ=tz, time_format="24", date_format="dmy", F1_TEST_NO_OPEN="1")
     e.update(env)
     if now:
         e["F1_NOW"] = now
@@ -131,8 +136,9 @@ def local(date, t, tz):
 
 
 def reset():
-    Mock.mode, Mock.overrides, Mock.page_size = "ok", {}, None
+    Mock.mode, Mock.overrides, Mock.page_size, Mock.delay = "ok", {}, None, 0
     Mock.hits.clear()
+    Mock.times.clear()
 
 
 def age(path, seconds):
@@ -256,7 +262,8 @@ class NextRaceTests(Base):
 
 
 class TimeZoneTests(Base):
-    CASES = ["Europe/London", "America/Los_Angeles", "Asia/Kolkata", "Australia/Melbourne", "Asia/Kathmandu", "Pacific/Chatham"]
+    CASES = ["Europe/London", "America/Los_Angeles", "Asia/Kolkata", "Australia/Melbourne", "Asia/Kathmandu", "Pacific/Chatham",
+             "Pacific/Kiritimati", "Pacific/Pago_Pago"]  # both sides of the date line
 
     def test_local_times_in_many_zones(self):
         race = fixture("2026/races")["MRData"]["RaceTable"]["Races"][20]  # Las Vegas: crosses midnight UTC
@@ -719,6 +726,257 @@ class AuditPass3Tests(Base):
         it = sf("schedule")
         self.assertEqual(it[0]["title"], "1. 🇦🇺 Australian Grand Prix")
         self.assertIn("Results pending", it[0]["subtitle"])
+
+
+# ---------- strict RFC 5545 checks (icalendar isn't installed, so by hand) ----------
+
+ICS_LINE = re.compile(r'^([A-Za-z0-9-]+)((?:;[A-Za-z0-9-]+=(?:"[^"\x00-\x1f]*"|[^";:,\x00-\x1f]*)(?:,(?:"[^"]*"|[^";:,\x00-\x1f]*))*)*):(.*)$')
+ICS_TEXT = {"SUMMARY", "LOCATION", "DESCRIPTION"}
+
+
+def check_ics(test, ics):
+    """Validate an .ics document against RFC 5545: CRLF lines of at most 75 octets, folding,
+    content-line grammar, TEXT escaping, component nesting and required properties."""
+    raw = ics.encode("utf-8")
+    test.assertTrue(raw.endswith(b"\r\n"))
+    test.assertNotIn(b"\r\n\r\n", raw)
+    physical = raw[:-2].split(b"\r\n")
+    for ln in physical:
+        test.assertNotIn(b"\n", ln)
+        test.assertNotIn(b"\r", ln)
+        test.assertLessEqual(len(ln), 75, ln)
+        ln.decode("utf-8")  # a fold never splits a UTF-8 sequence
+    lines = []
+    for ln in physical:
+        if ln[:1] in (b" ", b"\t"):
+            lines[-1] += ln[1:]
+        else:
+            lines.append(ln)
+    stack, comps = [], []
+    for b in lines:
+        line = b.decode("utf-8")
+        m = ICS_LINE.match(line)
+        test.assertTrue(m, line)
+        name, params, value = m.group(1).upper(), m.group(2), m.group(3)
+        test.assertIsNone(re.search(r"[\x00-\x08\x0a-\x1f\x7f]", value), line)
+        if name == "BEGIN":
+            stack.append((value, {}))
+            continue
+        if name == "END":
+            comp, props = stack.pop()
+            test.assertEqual(comp, value)
+            comps.append((comp, props))
+            continue
+        stack[-1][1].setdefault(name, []).append((params, value))
+        if name in ICS_TEXT:
+            # every \\ starts an escape, and ; and , are always escaped
+            test.assertIsNone(re.search(r"(?<!\\)(?:\\\\)*[;,]", value.replace("\\\\", "")), line)
+            test.assertIsNone(re.search(r"\\[^\;,nN]", value.replace("\\\\", "")), line)
+    test.assertEqual(stack, [])
+    cal = [p for c, p in comps if c == "VCALENDAR"]
+    test.assertEqual(len(cal), 1)
+    for k in ("VERSION", "PRODID"):
+        test.assertEqual(len(cal[0].get(k, [])), 1, k)
+    events = [p for c, p in comps if c == "VEVENT"]
+    for ev in events:
+        for k in ("UID", "DTSTAMP", "DTSTART"):
+            test.assertEqual(len(ev.get(k, [])), 1, k)
+        test.assertRegex(ev["DTSTAMP"][0][1], r"^\d{8}T\d{6}Z$")
+        (sp, sv), (ep, evv) = ev["DTSTART"][0], ev["DTEND"][0]
+        if sp == ";VALUE=DATE":
+            test.assertEqual(ep, ";VALUE=DATE")
+            test.assertRegex(sv, r"^\d{8}$")
+            test.assertGreater(evv, sv)
+        else:
+            test.assertEqual((sp, ep), ("", ""))
+            test.assertRegex(sv, r"^\d{8}T\d{6}Z$")
+            test.assertGreater(evv, sv)
+        if "URL" in ev:
+            test.assertRegex(ev["URL"][0][1], r"^https?://\S+$")
+    for c, p in comps:
+        if c == "VALARM":
+            test.assertEqual(p["ACTION"][0][1], "DISPLAY")
+            test.assertIn("DESCRIPTION", p)
+            test.assertRegex(p["TRIGGER"][0][1], r"^-PT\d+M$")
+    return events
+
+
+class AuditPass4Tests(Base):
+    """Background refresh, rate limits, cache size, .ics strictness, dates."""
+
+    def stale_drivers(self):
+        cache = new_cache()
+        sf("drivers", cache=cache)
+        f = cache_file(cache, "2026/driverstandings")
+        age(f, 2 * 3600)
+        return cache, f
+
+    def wait_unlocked(self, f, timeout=15):
+        end = time.time() + timeout
+        while os.path.exists(f + ".lock") and time.time() < end:
+            time.sleep(0.05)
+        self.assertFalse(os.path.exists(f + ".lock"))
+
+    def env(self, cache, **extra):
+        e = dict(os.environ, alfred_workflow_cache=cache, F1_API_BASE=BASE, TZ="Europe/London", time_format="24",
+                 date_format="dmy", F1_TEST_NO_OPEN="1", F1_NOW="2026-09-26T15:00:00Z")
+        e.update(extra)
+        return e
+
+    def test_refresh_survives_alfred_killing_the_script_filter(self):
+        cache, f = self.stale_drivers()
+        Mock.delay = 1.5
+        p = subprocess.Popen(["osascript", "-l", "JavaScript", "./f1.js", "race", "drivers"], cwd=SRC, env=self.env(cache),
+                             stdout=subprocess.PIPE, start_new_session=True)
+        out = p.stdout.readline()
+        # Alfred terminates the previous run on the next keystroke: kill its whole process group
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(p.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass  # the group is already gone (or only a zombie is left)
+        p.wait()
+        p.stdout.close()
+        self.assertEqual(json.loads(out)["rerun"], 0.5)
+        self.wait_unlocked(f)
+        self.assertLess(time.time() - os.path.getmtime(f), 30)  # the refresh completed
+        self.assertNotIn("rerun", sf("drivers", cache=cache, raw=True))
+
+    def test_one_refresher_for_concurrent_keystrokes(self):
+        cache, f = self.stale_drivers()
+        Mock.delay = 1
+        n = Mock.hits.count("2026/driverstandings")
+        procs = [subprocess.Popen(["osascript", "-l", "JavaScript", "./f1.js", "race", "drivers" + " " * i], cwd=SRC,
+                                  env=self.env(cache), stdout=subprocess.PIPE) for i in range(6)]
+        for p in procs:
+            self.assertEqual(json.loads(p.communicate()[0])["rerun"], 0.5)
+        self.wait_unlocked(f)
+        self.assertEqual(Mock.hits.count("2026/driverstandings") - n, 1)
+
+    def test_a_lock_left_by_a_killed_refresher_expires(self):
+        cache, f = self.stale_drivers()
+        os.mkdir(f + ".lock")
+        age(f + ".lock", 60)  # a slow refresh is still running: wait for it
+        n = len(Mock.hits)
+        self.assertEqual(sf("drivers", cache=cache, raw=True)["rerun"], 0.5)
+        time.sleep(0.5)
+        self.assertEqual(len(Mock.hits), n)
+        age(f + ".lock", 120)  # older than any refresh can take: take it over
+        sf("drivers", cache=cache)
+        self.wait_unlocked(f)
+        self.assertEqual(len(Mock.hits), n + 1)
+
+    def test_keystroke_storm_stays_under_the_rate_limit(self):
+        cache = new_cache()
+        sf("", cache=cache)  # the schedule
+        Mock.times.clear()
+        procs = [subprocess.Popen(["osascript", "-l", "JavaScript", "./f1.js", "race", f"results {r}"], cwd=SRC,
+                                  env=self.env(cache), stdout=subprocess.PIPE) for r in range(1, 15)]
+        for p in procs:
+            validate(json.loads(p.communicate()[0]))
+        times = sorted(Mock.times)
+        self.assertGreater(len(times), 3)
+        for i, t in enumerate(times):
+            self.assertLessEqual(sum(1 for u in times[i:] if u - t < 1.0), 4, times)  # Jolpica: 4 a second
+
+    def test_hourly_cap(self):
+        cache = new_cache()
+        os.makedirs(os.path.join(cache, "api"))
+        now = time.time() * 1000
+        with open(os.path.join(cache, "api", ".rate.json"), "w") as fh:
+            json.dump([now - 1000 * i for i in range(400)], fh)
+        it = sf("drivers", cache=cache)
+        self.assertEqual(it[0]["subtitle"], "Hourly request limit reached: try again later")
+        self.assertEqual(Mock.hits, [])
+
+    def test_429_pauses_every_request(self):
+        cache = new_cache()
+        Mock.mode = "429"
+        self.assertIn("rate limiting", sf("drivers", cache=cache)[0]["subtitle"])
+        Mock.mode = "ok"
+        n = len(Mock.hits)
+        self.assertIn("rate limiting", sf("teams", cache=cache)[0]["subtitle"])
+        self.assertEqual(len(Mock.hits), n)
+
+    def test_cache_is_pruned(self):
+        cache = new_cache()
+        api = os.path.join(cache, "api")
+        os.makedirs(api)
+        os.makedirs(os.path.join(cache, "ics"))
+        for i in range(340):
+            p = os.path.join(api, f"x_{i}.json")
+            with open(p, "w") as fh:
+                fh.write("{}")
+            age(p, i * 3600)
+        old = os.path.join(api, "ancient.json")
+        with open(old, "w") as fh:
+            fh.write("{}")
+        age(old, 61 * 86400)
+        ics = os.path.join(cache, "ics", "f1-2026-1-all.ics")
+        with open(ics, "w") as fh:
+            fh.write("x")
+        age(ics, 2 * 86400)
+        act("ics:2026:17:all", cache)
+        names = os.listdir(api)
+        self.assertNotIn("ancient.json", names)
+        self.assertLessEqual(len([n for n in names if n.endswith(".json") and not n.startswith(".")]), 300)
+        self.assertIn("x_0.json", names)
+        self.assertFalse(os.path.exists(ics))
+        self.assertTrue(os.path.exists(os.path.join(cache, "ics", "f1-2026-17-all.ics")))
+
+    def ics(self, arg, **env):
+        cache = new_cache()
+        self.assertEqual(act(arg, cache, **env), "")
+        season, rnd, key = arg.split(":")[1:]
+        with open(os.path.join(cache, "ics", f"f1-{season}-{rnd}-{key}.ics"), "rb") as fh:
+            return fh.read().decode()
+
+    def test_ics_is_strict_rfc5545(self):
+        events = check_ics(self, self.ics("ics:2026:17:all"))
+        self.assertEqual(len(events), 5)
+        check_ics(self, self.ics("ics:2021:10:all"))
+        check_ics(self, self.ics("ics:1950:1:all"))
+
+    def test_ics_hostile_names(self):
+        doc = fixture("2026/races")
+        r = doc["MRData"]["RaceTable"]["Races"][16]
+        r["raceName"] = "Back\\slash; comma, \"quote\" line\r\nBEGIN:VALARM\rbell\x07 tab\t é" + "é" * 40 + "😀" * 30 + "é" * 20 + "\ud800 end"
+        r["Circuit"]["Location"]["locality"] = "Marina,Bay;\nX"
+        r["url"] = "https://en.wikipedia.org/wiki/X\r\nATTACH:http://evil"
+        Mock.overrides["2026/races"] = doc
+        ics = self.ics("ics:2026:17:all")
+        events = check_ics(self, ics)
+        self.assertEqual(ics.count("\r\nBEGIN:VALARM\r\n"), 5)
+        self.assertNotIn("ATTACH", ics)
+        unfolded = ics.replace("\r\n ", "")
+        self.assertIn("SUMMARY:F1 Back\\\\slash\\; comma\\, \"quote\" line\\nBEGIN:VALARM\\nbell  tab  é", unfolded)
+        self.assertIn("� end: Sprint", unfolded)
+
+    def test_ics_alert_values(self):
+        self.assertIn("TRIGGER:-PT7M", self.ics("ics:2026:16:Race", calendar_alert="7.9"))
+        self.assertNotIn("VALARM", self.ics("ics:2026:16:Race", calendar_alert="soon"))
+        self.assertNotIn("VALARM", self.ics("ics:2026:16:Race", calendar_alert="-5"))
+
+    def test_southern_dst_starts_on_race_day(self):
+        # Sydney moves to summer time (+11) at 02:00 local on Sun 4 Oct 2026, hours before the 07:00Z race
+        it = sf("", now="2026-10-03T12:00:00Z", tz="Australia/Sydney")
+        race = find(it, "Race  ·")
+        self.assertEqual(race["title"], f"Race  ·  {local('2026-10-04', '07:00:00Z', 'Australia/Sydney')}")
+        self.assertEqual(race["title"], "Race  ·  Sun 4 Oct 18:00")
+        self.assertEqual(find(it, "Practice 1")["title"], "Practice 1  ·  Fri 2 Oct 14:30")  # still +10
+        self.assertTrue(race["subtitle"].startswith("in 19 h ·"), race["subtitle"])
+
+    def test_date_line_countdown_in_days(self):
+        # date-only sessions count calendar days where the user is, even across the date line
+        for tz, expected in (("Pacific/Kiritimati", "today"), ("Pacific/Pago_Pago", "tomorrow")):
+            it = sf("", now="2021-07-15T12:00:00Z", tz=tz)
+            self.assertTrue(it[1]["subtitle"].startswith(expected), (tz, it[1]["subtitle"]))
+
+    def test_month_first_date_format(self):
+        it = sf("", date_format="mdy")
+        self.assertEqual(it[1]["title"], "Practice 1  ·  Fri Oct 2 05:30")
+        it = sf("", now="2025-12-20T12:00:00Z", date_format="mdy")
+        self.assertEqual(it[1]["title"], "Practice 1  ·  Fri Mar 6, 2026 01:30")
 
 
 class PlistTests(unittest.TestCase):

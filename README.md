@@ -51,7 +51,7 @@ Start with a year to look back, like `race 2021`, `race 2021 drivers` or `race 2
 
 Standings refresh every hour, the schedule every day, and results every 10 minutes during a race weekend. Without a connection, the last data is shown with a notice.
 
-The keyword, race page, time format and Calendar alert can be changed in the Workflow’s Configuration.
+The keyword, race page, time and date format, and Calendar alert can be changed in the Workflow’s Configuration.
 
 ## Development
 

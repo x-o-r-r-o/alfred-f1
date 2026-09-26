@@ -243,7 +243,7 @@ Start with a year to look back, like `race 2021`, `race 2021 drivers` or `race 2
 
 Standings refresh every hour, the schedule every day, and results every 10 minutes during a race weekend. Without a connection, the last data is shown with a notice.
 
-The keyword, race page, time format and Calendar alert can be changed in the Workflow’s Configuration.
+The keyword, race page, time and date format, and Calendar alert can be changed in the Workflow’s Configuration.
 </string>
 	<key>uidata</key>
 	<dict>
@@ -358,6 +358,36 @@ The keyword, race page, time format and Calendar alert can be changed in the Wor
 			<string>popupbutton</string>
 			<key>variable</key>
 			<string>time_format</string>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>default</key>
+				<string>system</string>
+				<key>pairs</key>
+				<array>
+					<array>
+						<string>Same as macOS</string>
+						<string>system</string>
+					</array>
+					<array>
+						<string>Fri 2 Oct</string>
+						<string>dmy</string>
+					</array>
+					<array>
+						<string>Fri Oct 2</string>
+						<string>mdy</string>
+					</array>
+				</array>
+			</dict>
+			<key>description</key>
+			<string></string>
+			<key>label</key>
+			<string>Date format</string>
+			<key>type</key>
+			<string>popupbutton</string>
+			<key>variable</key>
+			<string>date_format</string>
 		</dict>
 		<dict>
 			<key>config</key>
