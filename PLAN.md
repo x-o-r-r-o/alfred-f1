@@ -46,7 +46,7 @@ Raycast demand this workflow replaces (downloads, 2026-09-26):
 - Session durations (for "live" markers and calendar events) are nominal: FP 60 min, sprint qualifying 45 min, qualifying 60 min, race 120 min (a race stays "next" for 3 h after the start).
 - Title-fight maths uses the points system from 2025 on (no fastest-lap point) and is shown only for 2025 and later; it counts a sprint weekend's sprint as still to come even if its points are already in the standings, so it can only overstate what's left, never eliminate someone too early.
 - On a completely empty cache, the first `race drivers` makes three requests (standings, schedule, previous round), so the rate limiter spaces them and it takes about 1.3 s once.
-- The rate-limiter mutex takes over a lock older than 3 s; two processes that find the same stale lock at the same instant could both pass once (harmless: at most one extra request).
+- The rate-limiter mutex takes over a lock older than 1 s (it is held for milliseconds; Alfred can kill a run mid-way, since the Script Filter terminates the previous run on each keystroke); two processes that find the same stale lock at the same instant could both pass once (harmless: at most one extra request).
 
 ## Verify in real Alfred
 - [ ] Hotkey opens the next race weekend; Tab autocompletion on menu, switch and schedule rows.

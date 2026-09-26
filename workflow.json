@@ -86,6 +86,7 @@
       "title": "Formula 1",
       "subtext": "Next race weekend, standings, results and schedule",
       "running": "Loading Formula 1 data…",
+      "queuemode": 2,
       "script": "osascript -l JavaScript ./f1.js race \"$1\""
     },
     {

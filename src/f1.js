@@ -390,7 +390,9 @@ function mkdirExclusive(path) {
   return !!$.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, false, $(), $());
 }
 
-// Run fn while holding a short mutex (mkdir is atomic). A lock left by a killed process expires.
+// Run fn while holding a short mutex (mkdir is atomic). It's held for a few milliseconds, so a lock
+// older than a second was left by a process that Alfred killed mid-run (queue mode "terminate
+// previous script"): take it over rather than make the next keystroke wait for it.
 function withMutex(path, fn) {
   for (let i = 0; i < 200; i++) {
     if (mkdirExclusive(path)) {
@@ -401,7 +403,7 @@ function withMutex(path, fn) {
       }
     }
     const a = fileAge(path);
-    if (a !== null && a > 3) removeFile(path);
+    if (a !== null && a > 1) removeFile(path);
     else $.NSThread.sleepForTimeInterval(0.01);
   }
   return undefined; // couldn't get the lock: callers treat this as busy rather than run unguarded

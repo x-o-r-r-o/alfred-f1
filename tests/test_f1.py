@@ -1202,6 +1202,51 @@ class Round4Tests(Base):
         self.assertEqual(sf("2025 drivers")[0]["subtitle"], "Final standings · ⌘↩ copies the table")
         self.assertEqual(sf("2021 drivers")[0]["subtitle"], "Final standings · ⌘↩ copies the table")
 
+    def test_a_run_killed_mid_fetch_leaves_nothing_broken(self):
+        # queue mode 2: Alfred terminates the previous run on each keystroke, at any point
+        cache = new_cache()
+        env = dict(os.environ, alfred_workflow_cache=cache, F1_API_BASE=BASE, TZ="Europe/London", time_format="24",
+                   date_format="dmy", F1_TEST_NO_OPEN="1", F1_NOW="2026-09-26T15:00:00Z")
+        for delay in (0.3, 0.6, 1.0):
+            Mock.delay = 2
+            p = subprocess.Popen(["osascript", "-l", "JavaScript", "./f1.js", "race", "drivers"], cwd=SRC, env=env,
+                                 stdout=subprocess.PIPE, start_new_session=True)
+            time.sleep(delay)
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(p.pid, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            p.wait()
+            p.stdout.close()
+        Mock.delay = 0
+        time.sleep(2.1)  # the mock finishes answering the killed requests
+        for name in os.listdir(os.path.join(cache, "api")):
+            if name.endswith(".json"):
+                with open(os.path.join(cache, "api", name)) as fh:
+                    json.load(fh)  # every file is whole: writes are atomic
+        it = sf("drivers", cache=cache)
+        self.assertEqual(it[0]["title"], "2026 Drivers’ Championship")
+
+    def test_mutex_left_by_a_killed_run_is_taken_over_quickly(self):
+        cache = new_cache()
+        sf("drivers", cache=cache)
+        os.remove(cache_file(cache, "2026/driverstandings"))  # the next run makes one request
+        os.makedirs(os.path.join(cache, "api", ".rate.lock"))
+        age(os.path.join(cache, "api", ".rate.lock"), 0.3)  # its owner was killed a moment ago
+        t = time.time()
+        it = sf("drivers", cache=cache)
+        self.assertEqual(it[0]["title"], "2026 Drivers’ Championship")
+        self.assertLess(time.time() - t, 1.8)  # waited well under a second for the dead owner's lock
+        self.assertFalse(os.path.exists(os.path.join(cache, "api", ".rate.lock")))
+
+    def test_script_filter_terminates_the_previous_run(self):
+        subprocess.run([sys.executable, "tools/build.py"], cwd=ROOT, check=True, capture_output=True)
+        with open(os.path.join(SRC, "info.plist"), "rb") as f:
+            p = plistlib.load(f)
+        sf_ = [o for o in p["objects"] if o["type"] == "alfred.workflow.input.scriptfilter"][0]
+        self.assertEqual(sf_["config"]["queuemode"], 2)
+
     def test_keyword_with_spaces_or_empty(self):
         cache = new_cache()
         for value, shown in (("  gp ", "gp"), ("", "race"), ("Rennen", "Rennen")):
