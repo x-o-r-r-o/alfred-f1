@@ -337,8 +337,10 @@ const CURL_ERRORS = { 6: "No internet connection (could not resolve the host)", 
 // ---------- rate limiting (shared by every process through the cache folder) ----------
 // Jolpica allows 4 requests a second and 500 an hour. A keystroke storm (each keystroke runs a
 // Script Filter) plus background refreshers must stay well below that, so every request reserves
-// a slot in a small log: at most RATE_BURST requests in any second and RATE_HOURLY in any hour.
-const RATE_BURST = 3;
+// a slot in a small log: at most RATE_BURST requests per RATE_WINDOW and RATE_HOURLY in any hour.
+// The window is longer than a second because network jitter can bunch requests together on arrival.
+const RATE_BURST = 2;
+const RATE_WINDOW = 1250; // ms
 const RATE_HOURLY = 400;
 const RATE_MAX_WAIT = 4000; // ms: give up (and show cached data) rather than queue for longer
 const COOLDOWN = 60; // seconds without any request after an HTTP 429
@@ -362,7 +364,7 @@ function withMutex(path, fn) {
     if (a !== null && a > 3) removeFile(path);
     else $.NSThread.sleepForTimeInterval(0.01);
   }
-  return fn();
+  return undefined; // couldn't get the lock: callers treat this as busy rather than run unguarded
 }
 
 // Reserve a request slot. Returns null (go ahead) or { error, status }.
@@ -370,8 +372,9 @@ function throttle() {
   const dir = `${cacheDir()}/api`;
   const cool = fileAge(`${dir}/.cooldown`);
   if (cool !== null && cool < COOLDOWN) return { error: RATE_MSG, status: 429 };
-  let wait = 0, err = null;
+  let wait = 0, err = { error: "Too many requests at once: try again in a few seconds", status: 429 };
   withMutex(`${dir}/.rate.lock`, () => {
+    err = null;
     const t = Date.now();
     let log = [];
     try {
@@ -386,7 +389,7 @@ function throttle() {
       return;
     }
     let slot = Math.max(t, log.length ? log[log.length - 1] : 0);
-    if (log.length >= RATE_BURST) slot = Math.max(slot, log[log.length - RATE_BURST] + 1000);
+    if (log.length >= RATE_BURST) slot = Math.max(slot, log[log.length - RATE_BURST] + RATE_WINDOW);
     if (slot - t > RATE_MAX_WAIT) {
       err = { error: "Too many requests at once: try again in a few seconds", status: 429 };
       return;
