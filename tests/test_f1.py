@@ -474,15 +474,18 @@ class CacheTests(Base):
         Mock.mode = "down"
         it = sf("drivers")
         self.assertEqual(it[0]["title"], "Couldn’t load the driver standings")
-        self.assertEqual(it[0]["subtitle"], "The F1 API returned HTTP 503 · Try again in a few minutes")
+        self.assertEqual(it[0]["subtitle"], "The F1 API returned an error (HTTP 503) · Try again in a few minutes")
         Mock.mode = "429"
-        self.assertIn("rate limiting", sf("drivers")[0]["subtitle"])
+        it = sf("drivers")
+        self.assertEqual((it[0]["title"], it[0]["subtitle"]), ("The Formula 1 API is limiting requests", "Try again in a minute"))
         Mock.mode = "html"
         self.assertEqual(sf("drivers")[0]["subtitle"], "Unexpected response from the F1 API · Try again in a few minutes")
 
     def test_no_network(self):
         it = sf("", F1_API_BASE="http://127.0.0.1:9/ergast/f1")
         self.assertEqual(it[0]["title"], "Can’t reach the Formula 1 API")
+        self.assertEqual(it[0]["subtitle"], "Check your internet connection")
+        self.assertEqual(it[0]["icon"]["path"], "icons/offline.png")
         self.assertIn("Driver Standings", titles(it))
 
     def test_stale_cache_served_when_offline(self):
@@ -490,7 +493,8 @@ class CacheTests(Base):
         sf("drivers", cache=cache)
         age(cache_file(cache, "2026/driverstandings"), 2 * 3600)
         it = sf("drivers", cache=cache, F1_SYNC="1", F1_API_BASE="http://127.0.0.1:9/ergast/f1")
-        self.assertTrue(it[0]["title"].startswith("Offline: showing data from 2 h"), it[0]["title"])
+        self.assertTrue(it[0]["title"].startswith("Offline: showing results from 2 h"), it[0]["title"])
+        self.assertEqual(it[0]["icon"]["path"], "icons/offline.png")
         self.assertEqual(it[1]["title"], "2026 Drivers’ Championship")
 
     def test_background_refresh(self):
@@ -522,7 +526,7 @@ class CacheTests(Base):
                 break
             time.sleep(0.1)
         it = sf("drivers", cache=cache)
-        self.assertTrue(it[0]["title"].startswith("Couldn’t update: showing data from 3 h"), it[0]["title"])
+        self.assertTrue(it[0]["title"].startswith("Couldn’t update: showing results from 3 h"), it[0]["title"])
         self.assertIn("HTTP 503", it[0]["subtitle"])
 
     def test_results_refresh_every_10_minutes_around_race_time(self):
@@ -684,8 +688,8 @@ class AuditPass2Tests(Base):
         age(cache_file(cache, "2026/driverstandings"), 2 * 3600)
         Mock.mode = "429"
         it = sf("drivers", cache=cache, F1_SYNC="1")
-        self.assertTrue(it[0]["title"].startswith("Couldn’t update: showing data from 2 h"), it[0]["title"])
-        self.assertIn("rate limiting", it[0]["subtitle"])
+        self.assertTrue(it[0]["title"].startswith("Couldn’t update: showing results from 2 h"), it[0]["title"])
+        self.assertIn("limiting requests", it[0]["subtitle"])
 
     def test_every_historical_nationality_and_country_has_a_flag(self):
         with open(os.path.join(SRC, "f1.js")) as fh:
@@ -888,16 +892,16 @@ class AuditPass4Tests(Base):
         with open(os.path.join(cache, "api", ".rate.json"), "w") as fh:
             json.dump([now - 1000 * i for i in range(400)], fh)
         it = sf("drivers", cache=cache)
-        self.assertEqual(it[0]["subtitle"], "Hourly request limit reached: try again later")
+        self.assertEqual(it[0]["subtitle"], "Try again later")
         self.assertEqual(Mock.hits, [])
 
     def test_429_pauses_every_request(self):
         cache = new_cache()
         Mock.mode = "429"
-        self.assertIn("rate limiting", sf("drivers", cache=cache)[0]["subtitle"])
+        self.assertEqual(sf("drivers", cache=cache)[0]["title"], "The Formula 1 API is limiting requests")
         Mock.mode = "ok"
         n = len(Mock.hits)
-        self.assertIn("rate limiting", sf("teams", cache=cache)[0]["subtitle"])
+        self.assertEqual(sf("teams", cache=cache)[0]["title"], "The Formula 1 API is limiting requests")
         self.assertEqual(len(Mock.hits), n)
 
     def test_cache_is_pruned(self):

@@ -372,7 +372,7 @@ function run_(path, args) {
   return { status: task.terminationStatus, out: s.isNil() ? "" : s.js };
 }
 
-const CURL_ERRORS = { 6: "No internet connection (could not resolve the host)", 7: "Could not connect to the F1 API", 28: "The F1 API timed out", 35: "Secure connection failed", 52: "The F1 API returned nothing", 56: "The connection was interrupted" };
+const CURL_ERRORS = { 6: "Couldn’t resolve the F1 API’s host name", 7: "Couldn’t connect to the F1 API", 28: "The F1 API timed out", 35: "Couldn’t make a secure connection", 52: "The F1 API returned nothing", 56: "The connection was interrupted" };
 
 // ---------- rate limiting (shared by every process through the cache folder) ----------
 // Jolpica allows 4 requests a second and 500 an hour. A keystroke storm (each keystroke runs a
@@ -384,7 +384,7 @@ const RATE_WINDOW = 1250; // ms
 const RATE_HOURLY = 400;
 const RATE_MAX_WAIT = 4000; // ms: give up (and show cached data) rather than queue for longer
 const COOLDOWN = 60; // seconds without any request after an HTTP 429
-const RATE_MSG = "The F1 API is rate limiting requests (HTTP 429): try again in a minute";
+const RATE_MSG = "The F1 API is limiting requests (HTTP 429): try again in a minute";
 
 function mkdirExclusive(path) {
   return !!$.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(path, false, $(), $());
@@ -451,14 +451,14 @@ function httpGet(url) {
   const blocked = throttle();
   if (blocked) return blocked;
   const r = run_("/usr/bin/curl", ["-sS", "-L", "--compressed", "--connect-timeout", "4", "--max-time", "12", "-A", UA, "-H", "Accept: application/json", "-w", "\n%{http_code}", url]);
-  if (r.status !== 0) return { error: CURL_ERRORS[r.status] || `Network error (curl ${r.status})`, status: 0 };
+  if (r.status !== 0) return { error: CURL_ERRORS[r.status] || `Couldn’t connect to the F1 API (curl ${r.status})`, status: 0 };
   const cut = r.out.lastIndexOf("\n");
   const code = +r.out.slice(cut + 1), body = r.out.slice(0, cut);
   if (code === 429) {
     writeFile(`${cacheDir()}/api/.cooldown`, String(Date.now()));
     return { error: RATE_MSG, status: 429 };
   }
-  if (code !== 200) return { error: `The F1 API returned HTTP ${code}`, status: code };
+  if (code !== 200) return { error: `The F1 API returned an error (HTTP ${code})`, status: code };
   try {
     const j = JSON.parse(body);
     if (!j || !j.MRData) throw new Error("no MRData");
@@ -607,8 +607,8 @@ function pruneCache(force) {
 }
 
 function staleNotice(age, error, status) {
-  const title = status ? `Couldn’t update: showing data from ${ago(age * 1000)}` : `Offline: showing data from ${ago(age * 1000)}`;
-  const n = info(title, `${error || "Could not update"} · Updates when the F1 API is reachable`, "offline");
+  const title = status ? `Couldn’t update: showing results from ${ago(age * 1000)}` : `Offline: showing results from ${ago(age * 1000)}`;
+  const n = info(title, `${error || "Couldn’t update"} · Updates when the F1 API is reachable`, "offline");
   if (!NOTICES.some((x) => x.icon.path === "icons/offline.png")) NOTICES.push(n);
 }
 
@@ -677,11 +677,17 @@ function lastAttempt(file) {
 // ---------- data access ----------
 
 function errorItems(r, what) {
-  const offline = r.status === 0;
-  const hint = /try again/i.test(r.error || "") ? "" : offline ? " · Check your connection, then type again" : " · Try again in a few minutes";
-  return [
-    info(offline ? "Can’t reach the Formula 1 API" : `Couldn’t load ${what}`, `${r.error}${hint}`, offline ? "offline" : "error"),
-  ];
+  if (r.status === 0) {
+    // not resolved or not connected: the Mac is offline; other network errors keep their detail
+    const plain = r.error === CURL_ERRORS[6] || r.error === CURL_ERRORS[7] || !r.error;
+    return [info("Can’t reach the Formula 1 API", plain ? "Check your internet connection" : `${r.error} · Check your internet connection`, "offline")];
+  }
+  if (r.status === 429) {
+    const again = /try again (.*)$/i.exec(r.error || "");
+    return [info("The Formula 1 API is limiting requests", again ? `Try again ${again[1]}` : "Try again in a minute", "error")];
+  }
+  const hint = /try again/i.test(r.error || "") ? "" : " · Try again in a few minutes";
+  return [info(`Couldn’t load ${what}`, `${r.error}${hint}`, "error")];
 }
 
 function pastSeason(year) {
@@ -1545,7 +1551,7 @@ function act(arg) {
     $.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(dir, true, $(), $());
     pruneCache(false);
     const file = `${dir}/${name}.ics`;
-    if (!writeFile(file, buildIcs(weekends))) return "Could not write the calendar file";
+    if (!writeFile(file, buildIcs(weekends))) return "Couldn’t write the calendar file";
     if (!TEST_MODE) $.NSWorkspace.sharedWorkspace.openURL($.NSURL.fileURLWithPath(file));
     return "";
   }
